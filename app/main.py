@@ -154,6 +154,19 @@ def _safe_back(back, fallback):
     return back if back.startswith("/") and not back.startswith("//") else fallback
 
 
+def _with_err(target, code):
+    """`target` with ?err=code added, placed before any #fragment.
+
+    Appending the query naively put it after the anchor — `/outreach#today`
+    became `/outreach#today?err=nollm`, where the whole thing is the fragment
+    and nothing ever reads the parameter. Every failure that redirected this way
+    was therefore silent. Splits on the first "#", adds to the path, reattaches.
+    """
+    path, sep, fragment = target.partition("#")
+    joiner = "&" if "?" in path else "?"
+    return f"{path}{joiner}err={code}{sep}{fragment}"
+
+
 def people_q(db):
     return db.query(Person).options(joinedload(Person.company)).order_by(Person.id)
 
@@ -242,6 +255,21 @@ ACTIVITY_ERRORS = {
 }
 
 
+# Why an outreach post was turned away, or produced nothing. Same pattern as
+# ACTIVITY_ERRORS above: without these the forms redirected on failure and the
+# page looked exactly as it does on success.
+OUTREACH_ERRORS = {
+    "finished": "That contact has already been through every step, so there was "
+                "nothing to start. Their trail is on their own page.",
+    "baddate": "That date could not be read, so the step was left where it was. "
+               "Use the date picker, or type it as YYYY-MM-DD.",
+    "nollm": "No language model is configured, so nothing could be drafted — "
+             "see the Settings page.",
+    "draft": "Drafting failed. The reason is on the contact's page, under the "
+             "step it was drafted for.",
+}
+
+
 @app.get("/person/{slug}", response_class=HTMLResponse)
 def person_page(slug: str, request: Request, err: str = "",
                 db: Session = Depends(get_session)):
@@ -251,7 +279,8 @@ def person_page(slug: str, request: Request, err: str = "",
     return templates.TemplateResponse(
         request, "person.html",
         ctx(request, db, nav="people", person=person, full_page=True,
-            activity_error=ACTIVITY_ERRORS.get(err)),
+            activity_error=ACTIVITY_ERRORS.get(err),
+            outreach_error=OUTREACH_ERRORS.get(err)),
     )
 
 
@@ -438,7 +467,7 @@ def refresh_linkedin_now(slug: str, back: str = Form(""),
 
 @app.get("/outreach", response_class=HTMLResponse)
 def outreach_board(request: Request, db: Session = Depends(get_session),
-                   view: str = "today", country: str = "", category: str = ""):
+                   view: str = "today", err: str = "", country: str = "", category: str = ""):
     """The sequence board, one sheet at a time.
 
     Split by outreach_stage rather than by research status — the question this
@@ -475,7 +504,8 @@ def outreach_board(request: Request, db: Session = Depends(get_session),
 
     return templates.TemplateResponse(
         request, "outreach.html",
-        ctx(request, db, nav="outreach", view=view, new_people=new,
+        ctx(request, db, nav="outreach", view=view,
+            outreach_error=OUTREACH_ERRORS.get(err), new_people=new,
             active=active, done=done, sequence=outreach.SEQUENCE,
             due_here=due_here, country=country, category=category,
             country_options=segments.country_options(everyone),
@@ -489,9 +519,12 @@ def outreach_start(slug: str, back: str = Form(""),
     person = db.query(Person).filter(Person.slug == slug).first()
     if not person:
         return RedirectResponse("/people", status_code=303)
-    outreach.start(db, person)
-    return RedirectResponse(_safe_back(back, f"/person/{slug}#outreach"),
-                            status_code=303)
+    target = _safe_back(back, f"/person/{slug}#outreach")
+    # start() returns None for a contact whose sequence has already finished.
+    # Discarding that made the redirect indistinguishable from success.
+    if outreach.start(db, person) is None:
+        return RedirectResponse(_with_err(target, "finished"), status_code=303)
+    return RedirectResponse(target, status_code=303)
 
 
 @app.post("/outreach/{step_id}/done")
@@ -529,10 +562,11 @@ def outreach_reschedule(step_id: int, due: str = Form(""), back: str = Form(""),
         parsed = datetime.strptime(due, "%Y-%m-%d").date()
     except ValueError:
         parsed = None
-    if parsed:
-        outreach.reschedule(db, step, parsed)
-    return RedirectResponse(_safe_back(back, f"/person/{slug}#outreach"),
-                            status_code=303)
+    target = _safe_back(back, f"/person/{slug}#outreach")
+    if not parsed:
+        return RedirectResponse(_with_err(target, "baddate"), status_code=303)
+    outreach.reschedule(db, step, parsed)
+    return RedirectResponse(target, status_code=303)
 
 
 @app.post("/outreach/{step_id}/suggest")
@@ -563,7 +597,7 @@ def outreach_suggest(step_id: int, tone: str = Form(""), length: str = Form(""),
             tone=tone or None, length=length or None,
         )
     except messages.LLMNotConfigured:
-        return RedirectResponse(_safe_back(back, fallback) + "?err=nollm",
+        return RedirectResponse(_with_err(_safe_back(back, fallback), "nollm"),
                                 status_code=303)
     except Exception as exc:
         # A model that times out or answers with a 500 is not the reader's
@@ -571,7 +605,7 @@ def outreach_suggest(step_id: int, tone: str = Form(""), length: str = Form(""),
         # step so the panel can say what happened.
         step.person.draft_note = f"Drafting failed: {exc}"[:300]
         db.commit()
-        return RedirectResponse(_safe_back(back, fallback) + "?err=draft",
+        return RedirectResponse(_with_err(_safe_back(back, fallback), "draft"),
                                 status_code=303)
 
     if not result["stored"] and result.get("reason"):

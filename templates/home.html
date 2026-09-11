@@ -124,7 +124,6 @@
 
       {{ ui.person_head(person) }}
       {{ ui.summary_panel(person) }}
-      {{ ui.interests_panel(person) }}
 
       {# It sits here rather than in the left column because company_card's
          responsive classes are Tailwind's viewport breakpoints, not container
@@ -136,10 +135,9 @@
         {{ ui.company_card(person.company) }}
       {% endif %}
 
-      <div class="grid lg:grid-cols-2 gap-4">
-        {{ ui.linkedin_panel(person, allow_add=False) }}
-        {{ ui.web_panel(person) }}
-      </div>
+      {{ ui.company_web_panel(person.company) }}
+
+      {{ ui.linkedin_panel(person, allow_add=False) }}
     {% else %}
       <div class="card shadow-card p-10 text-center">
         <p class="text-[14px] font-medium">No contacts yet</p>

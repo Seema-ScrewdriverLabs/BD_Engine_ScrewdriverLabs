@@ -113,7 +113,62 @@ class Company(Base):
     description_source_url = Column(String)
     description_fetched_at = Column(DateTime)
 
+    # --- web research about the company itself.
+    #
+    # web_checked_at is the whole point of storing anything here: without it,
+    # an empty panel cannot tell "nobody has looked yet" from "we looked and
+    # the web has nothing", and those are opposite answers. web_note carries
+    # the second one's reason so the panel can say it.
+    web_checked_at = Column(DateTime)
+    web_note = Column(String)
+
     people = relationship("Person", back_populates="company")
+    findings = relationship(
+        "CompanyFinding",
+        back_populates="company",
+        cascade="all, delete-orphan",
+        order_by="CompanyFinding.rank",
+    )
+
+    @property
+    def web_searched(self):
+        """Whether anyone has actually run the company web search."""
+        return self.web_checked_at is not None
+
+    @property
+    def findings_by_source(self):
+        """Web findings grouped by the site they came from.
+
+        One section per source rather than a flat numbered list, because a
+        source is the unit a reader judges: two pieces from the company's own
+        newsroom are one kind of evidence and a trade-press write-up is
+        another, and interleaving them by rank makes the reader re-establish
+        which is which on every row.
+
+        Groups keep the order their first result appeared in, so the ranking
+        the search produced still decides what is read first — the company's
+        own site sorts last there, since the description panel already quotes
+        it and outside coverage is what this panel is for.
+        """
+        groups, order = {}, []
+        for finding in self.findings:
+            key = finding.source_domain or "unknown"
+            if key not in groups:
+                groups[key] = {
+                    "domain": key,
+                    "own_site": finding.on_own_site,
+                    "confirmation": finding.confirmation,
+                    "fetched_at": finding.fetched_at,
+                    "items": [],
+                }
+                order.append(key)
+            group = groups[key]
+            group["items"].append(finding)
+            # The freshest fetch in the group is what the section reports.
+            if finding.fetched_at and (not group["fetched_at"]
+                                       or finding.fetched_at > group["fetched_at"]):
+                group["fetched_at"] = finding.fetched_at
+        return [groups[k] for k in order]
 
     @property
     def location(self):
@@ -306,7 +361,25 @@ class Person(Base):
 
     @property
     def outreach_done_count(self):
+        """Steps actually carried out. Skipped ones do not count."""
         return sum(1 for s in self.outreach_steps if s.done_at)
+
+    @property
+    def outreach_skipped_count(self):
+        return sum(1 for s in self.outreach_steps if s.skipped_at)
+
+    @property
+    def outreach_closed_count(self):
+        """Steps no longer open — done or skipped.
+
+        What progress should be measured against, because a skipped step is a
+        step dealt with: a contact who skipped all four read "0 / 4" beside a
+        badge saying "Sequence complete". outreach_done_count is kept for
+        anything that means strictly work performed, and the panel shows the
+        split in a tooltip so the two are never confused.
+        """
+        return sum(1 for s in self.outreach_steps
+                   if s.done_at or s.skipped_at)
 
     @property
     def outreach_total(self):
@@ -838,6 +911,56 @@ class OutreachDraft(Base):
     def basis_lines(self):
         """`basis` as a list, for rendering one signal per line."""
         return [b.strip() for b in (self.basis or "").split(";") if b.strip()]
+
+
+class CompanyFinding(Base):
+    """What the web says about a company, as opposed to about a person.
+
+    Its own table rather than a flag on WebFinding, because the fact belongs to
+    the employer and not to whoever happens to work there. Three contacts at
+    Axonify share one Axonify; storing the same announcement three times would
+    pay for the same search three times, show three copies on the board, and
+    let the three drift apart when one is re-researched and the others are not.
+
+    Provenance is mandatory, exactly as on a web finding: the URL, the query
+    that surfaced it, and when it was fetched. `confirmation` records what tied
+    the result to this company rather than to a namesake — see
+    research._about_company. A row that clears nothing is not stored.
+    """
+    __tablename__ = "company_findings"
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), index=True)
+    company = relationship("Company", back_populates="findings")
+
+    title = Column(String)
+    url = Column(String)
+    snippet = Column(Text)
+    kind = Column(String)              # article / interview / event / news / profile
+    published_date = Column(Date)      # usually unknown from a search result
+    rank = Column(Integer, default=0)
+
+    source_query = Column(String)      # auditable: what we asked
+    fetched_at = Column(DateTime, default=utcnow)
+
+    # Why this result is about THIS company and not one with a similar name.
+    confirmation = Column(String)
+
+    @property
+    def source_domain(self):
+        """The host this came from — the key the panel groups on."""
+        if not self.url:
+            return ""
+        return self.url.split("//")[-1].split("/")[0].replace("www.", "").lower()
+
+    @property
+    def on_own_site(self):
+        return self.confirmation == "on the company's own site"
+
+    @property
+    def clean_snippet(self):
+        from app.summary import clean_snippet
+        return clean_snippet(self.snippet)
 
 
 class Interest(Base):

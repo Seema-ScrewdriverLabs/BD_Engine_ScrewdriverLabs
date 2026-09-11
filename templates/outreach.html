@@ -8,8 +8,7 @@
   <div class="flex items-end justify-between gap-4 flex-wrap">
     <div>
       <h1 class="text-[22px] font-bold tracking-tight">Outreach</h1>
-      <p class="text-[13px] text-ink-faint mt-0.5">Comment · wait 2 days · comment · connect · email 2 days later.
-        Every step is done by hand — this tracks where each contact is and what is due.
+      <p class="text-[13px] text-ink-faint mt-0.5">Comment · wait 2 days · comment · connect · email. Done by hand.
         {%- if country or category %} Showing
         {%- if country %} {{ country }}{% endif %}
         {%- if country and category %} ·{% endif %}
@@ -43,6 +42,8 @@
     </form>
   </div>
 
+  {{ ui.outreach_error_banner(outreach_error) }}
+
   {# Sheets rather than one long page: the New list alone fills a screen, which
      used to push the in-progress list — the one with actual work in it — below
      the fold. Each tab carries its own count so the numbers are visible without
@@ -74,8 +75,7 @@
       <svg class="w-[19px] h-[19px] text-brand-600 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
       <div class="min-w-0">
         <h3 class="text-[15px] font-bold leading-tight">Due today</h3>
-        <p class="text-[11.5px] text-ink-faint mt-0.5">Everything open and due today or earlier. Overdue steps stay
-          here rather than moving to their own list — a task that slipped is still today's task.</p>
+        <p class="text-[11.5px] text-ink-faint mt-0.5">Open and due today or earlier — overdue included.</p>
       </div>
     </div>
 
@@ -89,8 +89,8 @@
     <div class="rounded-xl border border-dashed border-[#DEDFE4] bg-[#FAFAFB] px-4 py-6 text-center">
       <svg class="w-7 h-7 mx-auto text-ink-faint/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 6 9 17l-5-5"/></svg>
       <p class="text-[13px] font-medium mt-2">Nothing due today</p>
-      <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">Either every open step is still waiting out its
-        gap, or nobody is in the sequence yet. Start someone from the <a href="/outreach?view=new{{ seg }}" class="text-violet2-600 hover:underline">New</a> sheet.</p>
+      <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">Every open step is still waiting out its gap, or nobody has started.
+        Start someone from <a href="/outreach?view=new{{ seg }}" class="text-violet2-600 hover:underline">New</a>.</p>
     </div>
     {% endif %}
   </section>
@@ -125,9 +125,8 @@
       </li>
       {% endfor %}
     </ul>
-    <p class="text-[11px] text-ink-faint mt-3">Starting a sequence moves the contact to the
-      <a href="/outreach?view=active{{ seg }}" class="text-violet2-600 hover:underline">In progress</a> sheet and creates the
-      first task — comment on one of their posts.</p>
+    <p class="text-[11px] text-ink-faint mt-3">Starting one creates the first task and moves the contact to
+      <a href="/outreach?view=active{{ seg }}" class="text-violet2-600 hover:underline">In progress</a>.</p>
     {% else %}
     <p class="text-[13px] text-ink-faint italic">Everyone has been approached.</p>
     {% endif %}
@@ -142,7 +141,7 @@
         <svg class="w-[19px] h-[19px] text-violet2-600 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg>
         <div class="min-w-0">
           <h3 class="text-[15px] font-bold leading-tight">In progress — already approached</h3>
-          <p class="text-[11.5px] text-ink-faint mt-0.5">Soonest due first. Each contact's open step is actionable here.</p>
+          <p class="text-[11.5px] text-ink-faint mt-0.5">Soonest due first.</p>
         </div>
       </div>
       <span class="text-[11px] font-medium text-violet2-600 bg-violet2-50 border border-violet2-100 rounded-full px-2.5 py-1 shrink-0">{{ active|length }}</span>
@@ -160,7 +159,7 @@
     {% else %}
     <div class="rounded-xl border border-dashed border-[#DEDFE4] bg-[#FAFAFB] px-4 py-6 text-center">
       <p class="text-[13px] font-medium">Nobody is mid-sequence</p>
-      <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">Start someone from the
+      <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">Start someone from
         <a href="/outreach?view=new{{ seg }}" class="text-violet2-600 hover:underline">New</a> sheet and they appear here
         until every step is closed.</p>
     </div>
@@ -191,7 +190,7 @@
           <a href="/person/{{ p.slug }}#outreach" class="text-[13.5px] font-medium hover:text-brand-600 hover:underline">{{ p.full_name }}</a>
           <p class="text-[12px] text-ink-faint truncate">{{ p.title or 'Designation unknown' }}{% if p.company %} · {{ p.company.name }}{% endif %}</p>
         </div>
-        <span class="text-[11.5px] text-ink-faint shrink-0">{{ p.outreach_done_count }}/{{ p.outreach_total }} done</span>
+        <span class="text-[11.5px] text-ink-faint shrink-0"><span title="{{ p.outreach_done_count }} done, {{ p.outreach_skipped_count }} skipped">{{ p.outreach_closed_count }}/{{ p.outreach_total }} closed</span></span>
       </li>
       {% endfor %}
     </ul>
@@ -202,6 +201,8 @@
   {% endif %}
 </div>
 
-{# Needed once per page for the copy buttons on the draft options to work. #}
-{{ ui.copy_script() }}
+{# No copy_script() here: the live copy buttons use the delegated handler in
+   base.html, which copies the enclosing data-copy-block. copy_script belongs to
+   copy_field_button and the dormant outreach_draft_block; shipping it as well put
+   a second, competing [data-copy] listener on the page. #}
 {% endblock %}

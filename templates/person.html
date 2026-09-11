@@ -14,16 +14,24 @@
 
   {{ ui.person_head(person) }}
   {{ ui.summary_panel(person) }}
-  {{ ui.interests_panel(person) }}
 
   {% if person.company %}
     {{ ui.company_card(person.company) }}
   {% endif %}
 
-  <div class="grid lg:grid-cols-2 gap-4 items-start">
-    {{ ui.linkedin_panel(person, allow_add=True, error=activity_error) }}
-    {{ ui.web_panel(person) }}
-  </div>
+  {# The company's own web presence sits directly under its profile, because
+     it answers the same question the card opens: who are these people. The
+     LinkedIn panel below is about the contact, and is full width now that it
+     no longer shares the row. #}
+  {{ ui.company_web_panel(person.company) }}
+
+  {{ ui.linkedin_panel(person, allow_add=True, error=activity_error) }}
+
+  {# The sequence sits above "What's still missing": it is the thing someone
+     opens this page to act on, and it used to be the last section on it,
+     below the whole data-completeness block. #}
+  {{ ui.outreach_error_banner(outreach_error) }}
+  {{ ui.outreach_panel(person) }}
 
   {# ------------------------------------------------- data completeness #}
   <section class="card shadow-card p-5">
@@ -72,11 +80,12 @@
     {% endif %}
   </section>
 
-  {{ ui.outreach_panel(person) }}
 
   {{ ui.opportunities_panel(person) }}
 </div>
 
-{# Needed once per page for the copy buttons on the draft options to work. #}
-{{ ui.copy_script() }}
+{# No copy_script() here: the live copy buttons use the delegated handler in
+   base.html, which copies the enclosing data-copy-block. copy_script belongs to
+   copy_field_button and the dormant outreach_draft_block; shipping it as well put
+   a second, competing [data-copy] listener on the page. #}
 {% endblock %}
