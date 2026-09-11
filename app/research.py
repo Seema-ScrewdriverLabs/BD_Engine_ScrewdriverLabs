@@ -201,15 +201,13 @@ def research_person(person, limit=5):
     the web say", and LinkedIn has its own panel that attributes posts properly.
     See _is_linkedin.
 
-    When that leaves fewer than `limit` rows — a real, common outcome for a
-    mid-level contact with no web footprint of their own — the remaining slots
-    are filled with general company news (a launch, an expansion, a
-    partnership) rather than left empty. This is exactly the kind of thing
-    Screwdriver's pitch draws on, so a contact with nothing personal findable
-    still leaves the panel useful instead of blank. Those rows are marked
-    `about_company` and never `corroborated`: interests.py and employer.py
-    already skip anything uncorroborated, so company filler can never be
-    mistaken for evidence about the person or leak into their interest chips.
+    Fewer than `limit` rows is a real and common outcome for a mid-level
+    contact with no web footprint of their own, and the answer is now an empty
+    list rather than a top-up of company news. That filler existed to keep the
+    old person-and-company panel from sitting empty; the company question has
+    its own panel now — see research_company_web — which asks it properly, once
+    per company rather than once per contact, and against a reliability check
+    of its own. Findings here are about the person, and only about the person.
     """
     company = person.company.name if person.company else ""
     domain = (person.company.domain or "") if person.company else ""
@@ -255,38 +253,9 @@ def research_person(person, limit=5):
                 "_low": host in LOW_VALUE,
             })
 
-    # Backfill with company news — one extra search, fired only when the
-    # person-specific queries above didn't already fill the panel.
-    if company and len(rows) < limit:
-        q = f'"{company}" {domain} announces OR launches OR unveils OR expands OR partners'.strip()
-        try:
-            hits = _search(q, limit=8, tbs=RECENT_WINDOW)
-        except (FirecrawlNotConfigured, FirecrawlRejected):
-            raise
-        except Exception:
-            hits = []
-        for h in hits:
-            url = h.get("url")
-            if not url or url in seen or _is_linkedin(url):
-                continue
-            seen.add(url)
-            host = _host(url)
-            rows.append({
-                "title": h.get("title") or url,
-                "url": url,
-                "snippet": (h.get("description") or "")[:600] or None,
-                "kind": classify(url, h.get("title")),
-                "source_query": q,
-                "fetched_at": datetime.now(timezone.utc),
-                "corroborated": False,
-                "corroboration": None,
-                "about_company": True,
-                "_low": host in LOW_VALUE,
-            })
-
-    # Evidence about the person always outranks company filler; within each
-    # tier, data-broker pages are pushed to the back.
-    rows.sort(key=lambda r: (r["about_company"], r["_low"]))
+    # Everything here is tied to the contact, so only the data-broker
+    # demotion is left to do.
+    rows.sort(key=lambda r: r["_low"])
     for i, r in enumerate(rows[:limit], start=1):
         r["rank"] = i
         r.pop("_low", None)
@@ -901,3 +870,170 @@ def research_company(company):
         "source_url": best.get("url"),
         "fetched_at": datetime.now(timezone.utc),
     }
+
+
+# ===========================================================================
+# What the web says about a company.
+#
+# Separate from research_person, and not a backfill for it. The Google / Web
+# panel used to answer "what does the web say about this contact" and quietly
+# top up with company news when that came back thin — which for a mid-level
+# contact is most of the time, so the panel's title described what it rarely
+# contained. Asking the company question directly gets better answers: a
+# company has a website, a newsroom and a name worth searching, where a
+# Content Manager has none of those.
+#
+# Results are stored on the Company, so one search serves every contact who
+# works there. Three contacts at Axonify share one Axonify.
+# ===========================================================================
+
+# Query angles, tried in order until the panel is full. Each carries the label
+# the panel shows when nothing is found, so "we searched" can name what was
+# actually asked rather than gesturing at it.
+COMPANY_ANGLES = (
+    ("{name} announces OR launches OR partners OR expands OR acquires",
+     RECENT_WINDOW, "recent announcements"),
+    ("{name} news {industry}", RECENT_WINDOW, "sector news"),
+    ('"{name}" about OR overview OR "what we do"', None, "who they are"),
+)
+
+# Pages that are about a company only in the sense that a directory lists it.
+COMPANY_LOW_VALUE = LOW_VALUE | {
+    "glassdoor.com", "indeed.com", "crunchbase.com", "bloomberg.com",
+    "dnb.com", "opencorporates.com", "pitchbook.com", "owler.com",
+    "trustpilot.com", "yelp.com", "facebook.com", "twitter.com", "x.com",
+}
+
+
+def _company_tokens(company):
+    """Facts about the employer a result can corroborate itself against.
+
+    The domain and the industry, and deliberately not the location. A city is
+    too common to corroborate anything: "Nelson" plus "Toronto" matched
+    "Nelson Mandela remembered in Toronto ceremony", which is the same namesake
+    failure research._corroborate exists to prevent, one level up. A domain is
+    unique and an industry is at least about what the company does.
+    """
+    out = []
+    for value in (company.domain, company.industry):
+        norm = _norm_text(value)
+        if norm and len(norm) > 2:
+            out.append(norm)
+    return out
+
+
+def _about_company(url, company, text=""):
+    """What ties this result to THIS company, or None to discard it.
+
+    The same problem the person search has, one level up: "Nelson" is a
+    publisher, a town, a car park and a great many other things, so a search
+    for a company name returns other companies. Two signals, either enough:
+
+    1. The page is on the company's own domain, or a subdomain of it.
+    2. Its text names the company AND carries one other fact from the record —
+       the domain, the industry, or where they are. One name on its own is not
+       a signal, for the same reason a person's name isn't: it is the thing
+       every namesake shares.
+
+    Anything clearing neither is not stored. An empty panel that says it is
+    empty beats a panel of some other company's press releases.
+    """
+    host = _host(url)
+    if not host:
+        return None
+
+    domain = (company.domain or "").lower()
+    if domain and (host == domain or host.endswith("." + domain)):
+        return "on the company's own site"
+
+    name = _norm_text(company.name)
+    blob = _norm_text(text)
+    if not (name and blob and name in blob):
+        return None
+
+    for token in _company_tokens(company):
+        if token in blob:
+            return f"names {company.name} alongside {token}"
+    return None
+
+
+def research_company_web(company, limit=8):
+    """Up to `limit` results about the company, ranked, each with its reason.
+
+    `limit` is the number of rows kept, not the number of searches: the three
+    angles are asked regardless, so keeping more costs nothing extra. Eight
+    rather than five because the panel groups by source, and a group of one is
+    a heading with a line under it.
+
+    Returns {"rows": [...], "queries": [...], "note": str|None}. An empty
+    `rows` is a real answer, not a failure: `note` says which angles were tried
+    so the panel can report that the search happened and came back empty rather
+    than looking like nobody ever ran it.
+    """
+    name = (company.name or "").strip()
+    if not name:
+        return {"rows": [], "queries": [],
+                "note": "No company name on file, so there was nothing to search for."}
+
+    industry = (company.industry or "").strip()
+    seen, rows, asked = set(), [], []
+
+    for template, window, label in COMPANY_ANGLES:
+        if len(rows) >= limit:
+            break
+        query = " ".join(
+            template.format(name=name, industry=industry).split()
+        ).strip()
+        asked.append((query, label))
+        try:
+            hits = _search(query, limit=8, tbs=window)
+        except (FirecrawlNotConfigured, FirecrawlRejected):
+            raise
+        except Exception:
+            continue          # one angle failing must not sink the others
+
+        for hit in hits:
+            url = hit.get("url")
+            if not url or url in seen:
+                continue
+            host = _host(url)
+            if _is_linkedin(url):
+                continue      # the LinkedIn panel's job
+            if host in COMPANY_LOW_VALUE:
+                continue      # a directory listing is not news about anyone
+            snippet = (hit.get("description") or "")[:600] or None
+            why = _about_company(url, company,
+                                 f"{hit.get('title') or ''} {snippet or ''}")
+            if why is None:
+                continue
+            seen.add(url)
+            rows.append({
+                "title": hit.get("title") or url,
+                "url": url,
+                "snippet": snippet,
+                "kind": classify(url, hit.get("title")),
+                "source_query": query,
+                "fetched_at": datetime.now(timezone.utc),
+                "confirmation": why,
+                # Their own site last: it is the least newsworthy thing we can
+                # show about a company and the description panel already
+                # quotes it. Off-domain coverage is what this panel is for.
+                "_own": 1 if why == "on the company's own site" else 0,
+            })
+
+    rows.sort(key=lambda r: r["_own"])
+    chosen = rows[:limit]
+    for i, row in enumerate(chosen, start=1):
+        row["rank"] = i
+        row.pop("_own", None)
+
+    note = None
+    if not chosen:
+        tried = ", ".join(label for _, label in asked) or "nothing"
+        note = (f"Searched {name} for {tried} and nothing came back that could "
+                f"be confirmed as this company. A result has to be on "
+                f"{company.domain or 'their own domain'}, or name them "
+                f"alongside another fact we hold — otherwise it may be a "
+                f"company with a similar name.")
+    return {"rows": [dict(r) for r in chosen],
+            "queries": [q for q, _ in asked], "note": note}

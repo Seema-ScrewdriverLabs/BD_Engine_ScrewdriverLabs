@@ -17,7 +17,8 @@ from . import resolve
 from . import messages as messages_mod
 from .db import SessionLocal
 from .models import (
-    Interest, LinkedInActivity, Person, WebFinding, RESEARCH_RUNNING,
+    CompanyFinding, Interest, LinkedInActivity, Person, WebFinding,
+    RESEARCH_RUNNING,
 )
 
 MAX_ACTIVITIES = 5
@@ -80,6 +81,7 @@ def research_contact(db, person, skip_interests=False, skip_linkedin=False,
     """
     out = {"findings": 0, "activities": 0, "interests": 0,
            "comments_drafted": 0, "company_described": False,
+           "company_findings": 0,
            "resolved": [], "problems": []}
 
     # ---- step 3: missing data enrichment, first
@@ -115,6 +117,31 @@ def research_contact(db, person, skip_interests=False, skip_linkedin=False,
             raise Blocked(str(e)) from e
         except Exception as e:
             out["problems"].append(f"company research: {e}")
+
+    # ---- step 7b: what the web says about the company
+    #
+    # Once per company, not once per contact: the answer is the same for
+    # everyone who works there, so the second contact at the same employer
+    # costs nothing. `web_checked_at` is what makes that decidable, and it is
+    # set whether or not anything was found — an empty result is an answer, and
+    # re-asking it every run would spend credits to learn the same nothing.
+    if person.company and (force or not person.company.web_checked_at):
+        try:
+            result = research.research_company_web(person.company)
+            if force:
+                for old_row in list(person.company.findings):
+                    person.company.findings.remove(old_row)
+                db.flush()
+            for row in result["rows"]:
+                db.add(CompanyFinding(company=person.company, **row))
+            person.company.web_checked_at = datetime.now(timezone.utc)
+            person.company.web_note = result["note"]
+            out["company_findings"] = len(result["rows"])
+            db.commit()
+        except (research.FirecrawlNotConfigured, research.FirecrawlRejected) as e:
+            raise Blocked(str(e)) from e
+        except Exception as e:
+            out["problems"].append(f"company web research: {e}")
 
     # ---- step 5: web research
     try:

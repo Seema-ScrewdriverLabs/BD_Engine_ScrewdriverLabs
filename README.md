@@ -67,9 +67,9 @@ export OUTREACH_SENDER_COMPANY="Screwdriver"
 | 2 | Parsing & Normalization | 75 Apollo columns → the ~25 fields the UI uses |
 | 3 | Missing Data Enrichment | gap detection per contact; `Person.missing_fields()` |
 | 4 | LinkedIn Activity | `app/research.py` — public post links from the search index, plus hand-pasted entries. LinkedIn is never crawled |
-| 5 | Google / Web Research | `app/research.py` — Firecrawl search, two query angles, each result marked confirmed or unconfirmed |
+| 5 | Google / Web Research | `app/research.py` — two query angles about the person, each result confirmed or discarded. Feeds the interest chips; it has no panel of its own |
 | 6 | Interest Detection | `app/interests.py` — OpenAI-compatible LLM call |
-| 7 | Company Research | `app/research.py` — company's own site preferred |
+| 7 | Company Research | `app/research.py` — the description from the company's own site, plus what the web says about them (`research_company_web`), run once per company |
 | 8 | Dashboard | FastAPI + Jinja2 templates |
 | 9 | Reports & Export | `/reports` — breakdowns and the stale-designation list |
 
@@ -516,6 +516,27 @@ Those are the defaults, so it works unset. When real accounts exist this reads
 the session instead and nothing else changes.
 
 ---
+
+## What the web says about a company
+
+`research_company_web` asks the company question directly instead of topping up
+a thin person search with company news. Three angles — recent announcements,
+sector news, who they are — and the rows live on the Company, so one search
+serves everyone who works there rather than being paid for and stored once per
+contact.
+
+A result is kept only when it is on the company's own domain, or names the
+company **alongside another fact we hold** — the domain or the industry.
+Deliberately not the location: "Nelson" plus "Toronto" matched "Nelson Mandela
+remembered in Toronto ceremony", which is research._corroborate's namesake
+problem one level up. A row clearing neither test is not stored.
+
+The panel distinguishes two empties that mean opposite things, which is why
+`web_checked_at` is written whether or not anything was found:
+
+- **Not searched yet** — nobody has asked. Not an empty result.
+- **Nothing reliable found** — the search ran; it names the angles tried, the
+  date, and why results were refused, and points at the company's own site.
 
 ## Provenance
 

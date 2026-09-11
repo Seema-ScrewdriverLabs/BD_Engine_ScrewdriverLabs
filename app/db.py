@@ -55,6 +55,10 @@ ADDED_COLUMNS = {
         ("linkedin_refreshed_at", "DATETIME"),
         ("linkedin_refresh_error", "VARCHAR"),
     ],
+    "companies": [
+        ("web_checked_at", "DATETIME"),
+        ("web_note", "VARCHAR"),
+    ],
     "web_findings": [
         ("corroborated", "BOOLEAN DEFAULT 0"),
         ("corroboration", "VARCHAR"),
