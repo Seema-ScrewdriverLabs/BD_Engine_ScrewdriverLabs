@@ -1,43 +1,74 @@
-# PeopleIntel
+# 🔍 PeopleIntel
 
-**A lead research dashboard for business development.** A CSV of contacts goes
-in; a browsable set of researched profiles comes out — who each person is, what
-they do, what they are currently interested in, what their employer does, and
-what you could sensibly say to them.
+**A lead research desk for business development.** A CSV of contacts goes in.
+Researched profiles come out — who each person is, what their company does,
+what they have been posting about, and a message written for them.
+
+<p>
+<img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white">
+<img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white">
+<img alt="SQLite" src="https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white">
+<img alt="Claude or Groq" src="https://img.shields.io/badge/Claude%20or%20Groq-your%20key-7A2FB8">
+<img alt="No build step" src="https://img.shields.io/badge/build%20step-none-success">
+</p>
 
 Built around three pillars: **Company · Designation · Person.**
 
-It is a tool for one team doing outbound by hand. It researches, it drafts, and
-it keeps track of where each conversation has got to — but it never sends
-anything. There is no send button anywhere in it, by design.
-
-> **Python only.** Node is not used at runtime and is not needed to run this.
-> There is roughly 100 lines of JavaScript in the whole app, in two places,
-> each doing something a form cannot: the draggable divider on Home, and
-> copy-to-clipboard. Everything else is server-rendered HTML and plain forms.
+It is a tool for one team doing outbound by hand. It researches, it drafts, it
+learns how you write — and it never sends anything. There is no send button
+anywhere in it, by design.
 
 ---
 
-## Contents
+## ⚡ How it works, in 60 seconds
+
+```
+  📥 Upload         a CSV of contacts. The file is parsed and discarded.
+        │
+  🔎 Research       one button per contact: company news, their LinkedIn
+        │           posts, what the company does. Everything cites a source.
+        │
+  📋 Sequence       four steps, one open at a time —
+        │           comment → wait 2 days → comment → connect → email
+        │
+  ✍️  Draft          it writes the comment or the email, following the
+        │           brief in skills/ and using your Claude or Groq key
+        │
+  📤 You send       copy, paste, send by hand. Nothing goes out on its own.
+        │
+  🧠 It learns      you say whether you used it. What you changed, and why,
+                    shapes the next draft.
+```
+
+**The rule behind most decisions:** it would rather say *nothing found* than
+make something up.
+
+---
+
+## 📖 Contents
 
 | | |
 |---|---|
-| [Quick start](#quick-start) | get it running in two commands |
-| [Configuration](#configuration) | the API keys, and what works without them |
-| [What's on each screen](#whats-on-each-screen) | the eight pages and what they answer |
-| [The 9 steps](#the-9-steps) | the research pipeline |
-| [Design rules](#design-rules) | the three rules that explain most decisions |
-| [Research](#research) | LinkedIn, the web, companies, CSV import |
-| [Outreach](#outreach) | the sequence, rejecting, drafted comments |
-| [The outreach email](#the-outreach-email) | composed from a template, not generated |
-| [Segmenting the list](#segmenting-the-list) | country and category filters |
-| [Project structure](#project-structure) | where everything lives |
-| [Stack](#stack) | and why each piece |
-| [Not built](#not-built) | deliberate omissions |
+| [⚡ How it works](#-how-it-works-in-60-seconds) | the whole thing on one screen |
+| [🚦 Quick start](#-quick-start) | get it running |
+| [🔑 Keys and providers](#-keys-and-providers) | Claude or Groq, entered in the UI |
+| [⚙️ Configuration](#-configuration) | every setting, and what works without it |
+| [🖥️ What's on each screen](#-whats-on-each-screen) | the nine pages |
+| [🪜 The 9 steps](#-the-9-steps) | the research pipeline |
+| [📐 Design rules](#-design-rules) | the three rules behind most decisions |
+| [🔎 Research](#-research) | LinkedIn, the web, companies, CSV import |
+| [📋 Outreach](#-outreach) | the sequence, rejecting, drafted comments |
+| [✉️ The outreach email](#-the-outreach-email) | composed from a template |
+| [📝 The copy brief](#-the-copy-brief) | the Markdown that decides what it writes |
+| [🧠 The profile it keeps](#-the-profile-it-keeps) | how it learns your voice |
+| [🎯 Segmenting the list](#-segmenting-the-list) | country and category filters |
+| [🗂️ Project structure](#-project-structure) | where everything lives |
+| [🧱 Stack](#-stack) | and why each piece |
+| [🚫 Not built](#-not-built) | deliberate omissions |
 
 ---
 
-## Quick start
+## 🚦 Quick start
 
 You need **Python 3.11+**. Nothing else — no Node, no database server, no build
 step.
@@ -76,12 +107,12 @@ Then open **<http://127.0.0.1:8000>** and upload a CSV from the **CSV Upload**
 page. Contacts appear immediately; research is a separate step.
 
 > A fresh clone starts with an empty database. The contact data is deliberately
-> not in the repository — see [Not built](#not-built) — so `data/*.csv` and
+> not in the repository — see [Not built](#-not-built) — so `data/*.csv` and
 > `data/*.db` are gitignored and you supply your own export.
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 Copy `.env.example` to `.env` and fill in what you need. Real environment
 variables always win over the file, so anything exported in the shell or set by
@@ -105,7 +136,7 @@ Any OpenAI-compatible endpoint works for the model. Groq and a self-hosted
 Ollama both speak the same chat-completions format, so moving between them is a
 change to `LLM_BASE_URL` and nothing else.
 
-### Running the research pipeline
+### 🔁 Running the research pipeline
 
 ```bash
 python run_pipeline.py --limit 5           # try a few first — it costs credits
@@ -123,7 +154,7 @@ rest.
 
 ---
 
-## What's on each screen
+## 🖥️ What's on each screen
 
 | Page | Answers |
 |---|---|
@@ -142,7 +173,7 @@ open outreach task, what is still missing, and what you could offer them.
 
 ---
 
-## The 9 steps
+## 🪜 The 9 steps
 
 | # | Step | How |
 |---|------|-----|
@@ -162,7 +193,7 @@ yet". Both have their own sections below.
 
 ---
 
-## Design rules
+## 📐 Design rules
 
 Three rules explain most of the decisions in this codebase. Where a section
 below justifies itself at length, it is usually one of these three being
@@ -185,7 +216,7 @@ merely forbidden in the prompt.
 
 ---
 
-### Two statuses, not one
+### 🔀 Two statuses, not one
 
 `enrichment_status` and `research_status` answer different questions and are
 tracked separately. Combining them was the bug: "Needs Enrichment" fired when
@@ -217,7 +248,7 @@ tool is built on and it comes from the file, so a blank one is a real hole.
 Drop it from `missing_critical()` if you'd rather it were optional - nothing
 else has to change.
 
-### The Research button
+### 🔘 The Research button
 
 A contact showing `Not researched` gets a **Research** button on the people list
 and on their own page; a failed one gets **Retry**. It posts to
@@ -233,7 +264,7 @@ in-app paths so the endpoint can't be turned into an open redirect.
 The button and the CLI both call `app/pipeline.py:research_contact`, so there is
 one definition of what "research a contact" means.
 
-### Precision over recall, and what it costs
+### 🎯 Precision over recall, and what it costs
 
 **1. Coverage is uneven, and that's the data, not a bug.**
 
@@ -296,7 +327,7 @@ the row. Mismatches are flagged on the contact's page and listed on `/reports`.
 Both values are kept — the tool doesn't silently overwrite the file or silently
 trust it.
 
-### Provenance
+### 🔗 Provenance
 
 Every fact the app fetched itself carries a clickable source and a fetch date:
 
@@ -311,9 +342,9 @@ source.
 
 ---
 
-## Research
+## 🔎 Research
 
-### LinkedIn
+### 💼 LinkedIn
 
 This app has no LinkedIn credentials, no scraper, and no third-party LinkedIn
 data provider. It never logs into LinkedIn and never fetches a linkedin.com
@@ -402,7 +433,7 @@ person actually wrote — a bare URL carries no meaning, so a link-only entry
 gives the model nothing to work with. That is why a link-only row says so on
 its face, and why pasting the text is still worth doing.
 
-### What the web says about a company
+### 🌐 What the web says about a company
 
 `research_company_web` asks the company question directly instead of topping up
 a thin person search with company news. Three angles — recent announcements,
@@ -423,7 +454,7 @@ The panel distinguishes two empties that mean opposite things, which is why
 - **Nothing reliable found** — the search ran; it names the angles tried, the
   date, and why results were refused, and points at the company's own site.
 
-### What the CSV importer tolerates
+### 📥 What the CSV importer tolerates
 
 The 75-column Apollo export is the happy path, but the file that arrives is
 often not that. Handled, each reported on the upload page rather than applied
@@ -450,9 +481,9 @@ swallow another column's data.
 
 ---
 
-## Outreach
+## 📋 Outreach
 
-### The sequence
+### 🪜 The sequence
 
 Steps 1–9 answer "who is this person". The sequence answers "have we spoken to
 them yet", which is independent of it — a fully researched contact nobody has
@@ -512,7 +543,7 @@ answers *will the first task have anything in it*. `Person.outreach_prep` decide
 both in one place, and counts posts and reposts separately — a repost is not
 something they wrote.
 
-### Rejecting a contact
+### 🚫 Rejecting a contact
 
 Some contacts should not be approached, and that is a different fact from a
 finished sequence or a skipped step: those record work that was done, this
@@ -537,7 +568,7 @@ remembering to ask.
 
 Reversible at any time, from the Rejected sheet or the contact's page.
 
-### The task dialog
+### 🗨️ The task dialog
 
 On the **In progress** sheet a contact is one line — name, step, timing, state —
 and the task itself opens in a dialog when you click the name. Rendering every
@@ -560,7 +591,7 @@ in a stacked arrangement — so the routes and field names cannot diverge.
 
 ---
 
-### What gets written for you
+### ✍️ What gets written for you
 
 Three of the four steps end in something a person has to write, and a task that
 says only "comment on their post" leaves the actual work undone. So the app
@@ -577,9 +608,9 @@ Nothing is sent automatically. There is no send button anywhere in this app.
 The split is not an accident. A comment has to respond to one specific post, so
 it has to be written. An email is mostly brand boilerplate that must read
 identically on every lead, so writing it fresh each time is the wrong tool — see
-[The outreach email](#the-outreach-email).
+[The outreach email](#-the-outreach-email).
 
-### Drafted comments
+### 💬 Drafted comments
 
 **Draft comments** on a contact's LinkedIn panel drafts one comment for each post
 on file. Re-running skips posts that already have one, so a stray double-click
@@ -622,7 +653,7 @@ length bands sit far under the hard limit rather than near it.
 
 ---
 
-### The outreach email
+## ✉️ The outreach email
 
 The email step does not ask a model to write an email. It **composes** one from
 an approved template — `app/email_template.py` — in which the brand blocks are
@@ -728,7 +759,103 @@ the session instead and nothing else changes.
 
 ---
 
-## Segmenting the list
+---
+
+## 🔑 Keys and providers
+
+Two providers, chosen on the **Settings** page. Keys for both can sit on file
+at once; the radio decides which one is called.
+
+| | Claude | Groq |
+|---|---|---|
+| Default model | `claude-sonnet-5` | `openai/gpt-oss-120b` |
+| How it is called | the official `anthropic` SDK | OpenAI-compatible `/chat/completions` |
+| Key variable | `ANTHROPIC_API_KEY` | `GROQ_API_KEY` |
+| JSON guarantee | a real schema, enforced by the API | asks for JSON and trusts the prompt |
+
+**Keys are entered in the UI.** Settings writes them to `.env` *and* into the
+running process, so a key works on the next click rather than after a restart.
+A key is never shown again once saved, which is why a blank field means *leave
+it alone* and clearing is its own button.
+
+**Whichever key is attached gets used.** If you pick Claude but only a Groq key
+is on file, it calls Groq rather than failing with "no key". `LLM_PROVIDER`
+records your choice; `llm.provider()` decides what actually runs.
+
+One thing the two APIs genuinely disagree on, absorbed in `app/llm.py`: Claude
+Sonnet 5 **requires** `max_tokens` and **rejects** `temperature` outright,
+while the OpenAI shape wants the opposite. Call sites never see the difference.
+
+> Any OpenAI-compatible host works in the Groq slot — point `GROQ_BASE_URL` at
+> a local Ollama and no other change is needed.
+
+---
+
+## 📝 The copy brief
+
+What the app writes is decided by **Markdown, not Python**. Three files in
+`skills/`, editable by whoever owns the messaging:
+
+| File | What it holds |
+|---|---|
+| `SKILL.md` | the process and the guardrails — find the signal, refuse rather than invent |
+| `voice-and-format.md` | tone, banned phrases, the 80–120 word band, subject rules |
+| `screwdriver-knowledge.md` | capabilities and portfolio, for finding a real match |
+
+`app/skills.py` loads them, strips the front matter, and assembles two prompts:
+one for the email, one for a comment. **Edits take effect on the next draft** —
+the loader caches on file modification time, so there is no restart and no
+deploy.
+
+The banned-phrase list is read back **out of** `voice-and-format.md` at
+validation time. So editing the file changes both what is asked for and what is
+enforced, and the checker cannot fall behind the brief. That is design rule 3
+made literal.
+
+The comment prompt deliberately omits the capability list: the brief forbids
+mentioning Screwdriver in a comment, so the model is not given the material.
+
+---
+
+## 🧠 The profile it keeps
+
+A model call carries nothing over from the last one. So the memory is ours — a
+profile in the database, rendered into the system prompt on every draft. The
+model is handed a fresh memory each time and holds none of it.
+
+**The loop.** Under every draft: *Used it as-is* · *I changed it* · *Didn't use
+it* · *Skip*. Choosing "changed it" opens a box pre-filled with the draft —
+edit it to what you actually sent, and add one line on why. Skip is recorded so
+the same draft stops asking, and the whole question has an off switch.
+
+**Four kinds of memory**, kept apart because they are not equally trustworthy:
+
+| Kind | Where it comes from | Rule |
+|---|---|---|
+| 🪪 **Fact** | you, or the sender settings | stable |
+| ⭐ **Preference** | you typed it | true on arrival, never auto-retired |
+| 📊 **Behaviour** | worked out from your edits | must be seen **twice** before it counts |
+| 📜 **History** | a rolling summary | replaces itself, never accumulates |
+
+**Anything you state outranks anything it inferred.** An inference can be
+wrong, and the person it would be wrong about is sitting right there.
+
+**What can be measured is measured first** — the word-count delta, whether the
+closing question survived, whether you rewrote the opener. No model call, no
+hallucination, and it still works when the API is down.
+
+**One edit proposes, two confirm.** A pattern seen once is stored but held
+back, because distilling confident rules from single incidents is how a memory
+becomes wrong. The **Profile** page lists the pending ones so it is visible why
+something is not yet in force, with the evidence behind each.
+
+**The raw log is never injected.** Every answer is kept, but only the
+compressed summary reaches a prompt — that is what stops the prompt growing
+with every message ever sent. The injected block is capped at 1,500 characters
+against a system prompt that is already ~13,600, and a test asserts it.
+
+
+## 🎯 Segmenting the list
 
 Two independent filters on the People list and the Outreach board, in
 `app/segments.py`. Either narrows on its own; together they intersect —
@@ -759,7 +886,7 @@ category view would quietly shrink the list.
 
 ---
 
-## Project structure
+## 🗂️ Project structure
 
 ```
 BD_Engine/
@@ -787,12 +914,12 @@ BD_Engine/
 ├── tools/                 the project-guide PDF builder
 ├── run_pipeline.py        the research CLI
 ├── run.ps1                start the app on Windows
-└── requirements.txt       six direct dependencies
+└── requirements.txt       seven direct dependencies
 ```
 
-The eight tables: `people`, `companies`, `linkedin_activities`,
+The ten tables: `people`, `companies`, `linkedin_activities`,
 `web_findings`, `company_findings`, `interests`, `outreach_steps` and
-`outreach_drafts`.
+`outreach_drafts`, `profile_entries` and `draft_feedback`.
 
 **Where to start reading.** `app/models.py` for the shape of the data,
 `app/pipeline.py` for what research actually does, and `templates/_partials.html`
@@ -800,7 +927,7 @@ for the UI — every panel in the app is a macro in that one file.
 
 ---
 
-## Stack
+## 🧱 Stack
 
 | Part | Choice |
 |---|---|
@@ -842,7 +969,7 @@ tailwindcss -i input.css -o static/app.css --minify
 
 ---
 
-## Not built
+## 🚫 Not built
 
 - **Sending anything.** Drafting is built (see Suggested messages); sending is
   not, and is not planned. No mailbox is connected, nothing posts to LinkedIn,

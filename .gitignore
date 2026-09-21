@@ -38,3 +38,8 @@ env/
 
 # Personal Claude Code overrides for this checkout, not team config.
 .claude/settings.local.json
+
+# Snapshots of the assembled system prompt, written for reading.
+# Generated from skills/*.md plus the live profile, so a committed copy
+# would be wrong the moment either changes.
+system-prompt-*.txt
