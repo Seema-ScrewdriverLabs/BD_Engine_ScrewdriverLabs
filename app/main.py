@@ -15,12 +15,14 @@ from .models import (
     Person, Company, LinkedInActivity, WebFinding, Interest, OutreachStep,
     STATUS_COMPLETE, STATUS_NEEDS_ENRICHMENT, STATUS_FAILED,
     RESEARCH_DONE, RESEARCH_FAILED, RESEARCH_RUNNING,
+    ProfileEntry, DraftFeedback, CATEGORY_LABELS,
     ACTIVITY_LABELS,
 )
 from .env import status as env_status
 from . import env as env_module
 from . import llm
 from . import skills
+from . import profile
 from . import pipeline
 from . import outreach
 from . import messages
@@ -112,6 +114,7 @@ templates.env.globals.update(
     llm_label=llm.label,
     llm_ready=llm.configured,
     skill_ready=skills.available,
+    feedback_on=profile.enabled,
     TIER_LABELS=personalisation.TIER_LABELS,
     # The outreach email is composed on read, so the panel calls the composer
     # directly with whatever tone and length the reader picked. Nothing is
@@ -840,7 +843,7 @@ def outreach_skill_email(step_id: int, back: str = Form(""),
     target = _safe_back(back, f"/person/{step.person.slug}#outreach")
 
     try:
-        result = messages.skill_email(step.person)
+        result = messages.skill_email(step.person, db=db)
     except messages.LLMNotConfigured:
         return RedirectResponse(_with_err(target, "nollm"), status_code=303)
     except skills.SkillMissing:
@@ -903,3 +906,173 @@ def delete_activity(activity_id: int, db: Session = Depends(get_session)):
     person.recompute_status()
     db.commit()
     return RedirectResponse(f"/person/{slug}#linkedin", status_code=303)
+
+
+# =========================================================== the feedback loop
+#
+# A draft is generated, edited in the box, copied, and sent — and until now
+# everything after "generated" was invisible to the app. These two routes are
+# where that stops: what happened to the draft, and what the app learns from it.
+
+FEEDBACK_NOTES = {
+    "noted": "Noted. Thanks — that is what teaches it.",
+    "learned": "Noted, and it learned something from it. See Profile.",
+    "skipped": "Skipped. It will not ask about that draft again.",
+    "added": "Added to your profile. It applies from the next draft.",
+    "removed": "Removed.",
+}
+
+
+def _with_ok(target, code):
+    """`target` with ?ok=code, before any #fragment. Mirrors _with_err."""
+    path, sep, fragment = target.partition("#")
+    joiner = "&" if "?" in path else "?"
+    return f"{path}{joiner}ok={code}{sep}{fragment}"
+
+
+@app.post("/feedback/{kind}/{ref_id}")
+def draft_feedback(kind: str, ref_id: int,
+                   outcome: str = Form("skipped"),
+                   final_subject: str = Form(""),
+                   final_body: str = Form(""),
+                   reason: str = Form(""),
+                   back: str = Form(""),
+                   db: Session = Depends(get_session)):
+    """Record what happened to one draft, and learn from it.
+
+    One route for both kinds because the answer is the same shape either way;
+    `kind` only decides which row `ref_id` points at — an OutreachStep for the
+    email, a LinkedInActivity for a comment, since the two drafting paths store
+    their output in two different tables.
+    """
+    if kind not in ("email", "comment"):
+        return RedirectResponse("/outreach", status_code=303)
+    if outcome not in ("used", "edited", "unused", "skipped"):
+        outcome = "skipped"
+
+    person = step_key = activity_id = None
+    draft_subject = draft_body = ""
+
+    if kind == "email":
+        step = db.query(OutreachStep).filter(OutreachStep.id == ref_id).first()
+        if not step:
+            return RedirectResponse("/outreach", status_code=303)
+        person, step_key = step.person, step.step_key
+        written = step.written_email
+        if written:
+            draft_subject, draft_body = written.subject or "", written.body or ""
+    else:
+        activity = (db.query(LinkedInActivity)
+                    .filter(LinkedInActivity.id == ref_id).first())
+        if not activity:
+            return RedirectResponse("/people", status_code=303)
+        person, activity_id = activity.person, activity.id
+        draft_body = activity.suggested_comment or ""
+
+    target = _safe_back(back, f"/person/{person.slug}#outreach")
+
+    row = DraftFeedback(
+        person=person, kind=kind, step_key=step_key, activity_id=activity_id,
+        outcome=outcome,
+        draft_subject=draft_subject, draft_body=draft_body,
+        final_subject=(final_subject or "").strip() or None,
+        final_body=(final_body or "").strip() or None,
+        reason=(reason or "").strip() or None,
+        vertical=_vertical_key(person),
+        provider=llm.provider(), model=llm.model_name(),
+        profile_applied=_safe_applied(db, person, kind),
+    )
+    # An edit with nothing in the box is not an edit. Recorded as "used"
+    # rather than inventing a change that was never made.
+    if outcome == "edited" and not row.final_body:
+        row.outcome = "used"
+    db.add(row)
+    db.commit()
+
+    if row.outcome == "skipped":
+        return RedirectResponse(_with_ok(target, "skipped"), status_code=303)
+
+    # Learning must never cost the answer that was just given: the row above is
+    # already committed, and observe() swallows its own failures.
+    learned = profile.observe(db, row)
+    return RedirectResponse(
+        _with_ok(target, "learned" if learned else "noted"), status_code=303)
+
+
+def _vertical_key(person):
+    try:
+        key, _spec = email_template.vertical_for(person)
+        return key
+    except Exception:
+        return None
+
+
+def _safe_applied(db, person, kind):
+    try:
+        return profile.applied_ids(db, person, kind) or None
+    except Exception:
+        return None
+
+
+# ================================================================== profile
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, ok: str = "",
+                 db: Session = Depends(get_session)):
+    """What the app knows about you, and where it got it from."""
+    profile.seed_facts(db)
+    rows = db.query(ProfileEntry).all()
+    grouped, pending = {}, []
+    for row in rows:
+        if not row.active:
+            pending.append(row)
+            continue
+        grouped.setdefault(row.category, []).append(row)
+    for items in grouped.values():
+        items.sort(key=lambda e: (0 if e.locked else 1, -(e.times_seen or 1)))
+    pending.sort(key=lambda e: -(e.times_seen or 1))
+
+    answered = db.query(DraftFeedback).count()
+    return templates.TemplateResponse(
+        request, "profile.html",
+        ctx(request, db, nav="profile",
+            grouped=grouped, pending=pending,
+            order=("fact", "preference", "behaviour", "history"),
+            labels=CATEGORY_LABELS,
+            answered=answered,
+            confirm_at=profile.CONFIRM_AT,
+            asking=profile.enabled(),
+            profile_ok=FEEDBACK_NOTES.get(ok)),
+    )
+
+
+@app.post("/profile/add")
+def profile_add(text: str = Form(""), category: str = Form("preference"),
+                db: Session = Depends(get_session)):
+    """Tell it something directly. Active at once — you are the authority."""
+    profile.add_told(db, category, text)
+    return RedirectResponse(_with_ok("/profile", "added"), status_code=303)
+
+
+@app.post("/profile/{entry_id}/toggle")
+def profile_toggle(entry_id: int, db: Session = Depends(get_session)):
+    entry = db.query(ProfileEntry).filter(ProfileEntry.id == entry_id).first()
+    if entry:
+        entry.active = not entry.active
+        db.commit()
+    return RedirectResponse("/profile", status_code=303)
+
+
+@app.post("/profile/{entry_id}/delete")
+def profile_delete(entry_id: int, db: Session = Depends(get_session)):
+    entry = db.query(ProfileEntry).filter(ProfileEntry.id == entry_id).first()
+    if entry:
+        db.delete(entry)
+        db.commit()
+    return RedirectResponse(_with_ok("/profile", "removed"), status_code=303)
+
+
+@app.post("/profile/asking")
+def profile_asking(db: Session = Depends(get_session)):
+    """Turn the whole question off, or back on."""
+    env_module.save({profile.OFF_VAR: "" if not profile.enabled() else "1"})
+    return RedirectResponse("/profile", status_code=303)

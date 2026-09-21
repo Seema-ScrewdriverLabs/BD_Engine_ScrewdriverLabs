@@ -352,6 +352,34 @@ class Person(Base):
         cascade="all, delete-orphan",
         order_by="OutreachDraft.variant",
     )
+    # What happened to those drafts. Newest first, because every reader of this
+    # wants the last answer, not the first.
+    draft_feedback = relationship(
+        "DraftFeedback",
+        back_populates="person",
+        cascade="all, delete-orphan",
+        order_by="DraftFeedback.created_at.desc()",
+    )
+    # Stop asking about this one contact. The app-wide off switch is a setting;
+    # this is for the lead you are handling differently.
+    feedback_opt_out = Column(Boolean, default=False)
+
+    def feedback_for(self, kind, step_key=None, activity_id=None):
+        """The answer already given for this draft, or None.
+
+        Keyed the way the draft itself is: an email by its step, a comment by
+        the post it replies to. Without the second key, answering comment_1
+        would silently answer comment_2 as well.
+        """
+        for row in self.draft_feedback:
+            if row.kind != kind:
+                continue
+            if activity_id is not None and row.activity_id != activity_id:
+                continue
+            if activity_id is None and step_key and row.step_key != step_key:
+                continue
+            return row
+        return None
 
     # ---- outreach sequence. See app/outreach.py for the sequence itself; the
     #      properties here answer only "where is this contact in it", which is
@@ -1081,3 +1109,142 @@ class Interest(Base):
     derived_from = Column(String)     # "linkedin" | "web" | "both"
     rank = Column(Integer, default=0)
     generated_at = Column(DateTime, default=utcnow)
+
+
+# --------------------------------------------------------------- the profile
+#
+# A model call carries no memory of the last one. So what the app knows about
+# the person using it lives here, and app/profile.py renders the relevant part
+# into the system prompt on every draft. Nothing is remembered on the far side.
+
+PROFILE_CATEGORIES = ("fact", "preference", "behaviour", "history")
+PROFILE_SOURCES = ("told", "inferred", "summarised")
+PROFILE_SCOPES = ("global", "vertical", "person")
+
+CATEGORY_LABELS = {
+    "fact": "Who you are",
+    "preference": "What you have told it",
+    "behaviour": "What your edits show",
+    "history": "What has happened so far",
+}
+
+
+class ProfileEntry(Base):
+    """One remembered thing about the sender.
+
+    Four categories, because they are not equally trustworthy and must not be
+    updated by the same rule. Something you typed outranks something the app
+    worked out, permanently and by construction: an inference can be wrong, and
+    the person it would be wrong about is sitting right there.
+    """
+    __tablename__ = "profile_entries"
+
+    id = Column(Integer, primary_key=True)
+
+    category = Column(String, index=True)   # PROFILE_CATEGORIES
+    # Only facts are keyed — "role", "company", "targets" — so re-stating one
+    # replaces it rather than stacking a second answer to the same question.
+    key = Column(String)
+    text = Column(Text)                     # the sentence that gets injected
+
+    # told      — you typed it. True on arrival, never auto-evicted.
+    # inferred  — worked out from your edits. Must be confirmed before it counts.
+    # summarised— the rolling history roll-up. Replaces itself.
+    source = Column(String, index=True)
+    # What produced it. Required for anything not `told`, and enforced in
+    # app/profile.py rather than merely asked for — the same rule interests.py
+    # applies to a chip.
+    evidence = Column(Text)
+
+    scope = Column(String, default="global", index=True)   # PROFILE_SCOPES
+    scope_key = Column(String)              # None | a vertical | a person id
+    applies_to = Column(String, default="both")            # email|comment|both
+
+    # A mechanical entry names a literal phrase, so the existing validators can
+    # enforce it instead of the prompt merely requesting it. Anything that needs
+    # judgement is not mechanical and can only be injected.
+    mechanical = Column(Boolean, default=False)
+    pattern = Column(String)
+
+    times_seen = Column(Integer, default=1)
+    active = Column(Boolean, default=False, index=True)
+
+    model = Column(String)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow)
+
+    @property
+    def category_label(self):
+        return CATEGORY_LABELS.get(self.category, self.category)
+
+    @property
+    def locked(self):
+        """Stated by a person, so the app does not get to retire it."""
+        return self.source == "told"
+
+    @property
+    def scope_label(self):
+        if self.scope == "global":
+            return "every draft"
+        if self.scope == "vertical":
+            return f"{self.scope_key} leads"
+        return "this contact"
+
+
+class DraftFeedback(Base):
+    """What happened to one draft: used, changed, or not used.
+
+    The raw log. Kept in full because it is a local SQLite file and costs
+    nothing, and **never injected into a prompt** — only the compressed summary
+    in ProfileEntry is. That split is what keeps the prompt from growing with
+    every message ever sent.
+
+    The draft is stored as a snapshot rather than a foreign key, because the two
+    drafting paths write to two different tables (LinkedInActivity for comments,
+    OutreachDraft for the email) and either can be regenerated out from under a
+    feedback row. A lesson has to keep the text it was drawn from.
+    """
+    __tablename__ = "draft_feedback"
+
+    id = Column(Integer, primary_key=True)
+    person_id = Column(Integer, ForeignKey("people.id"), index=True)
+    person = relationship("Person", back_populates="draft_feedback")
+
+    kind = Column(String, index=True)       # "email" | "comment"
+    step_key = Column(String)
+    activity_id = Column(Integer, ForeignKey("linkedin_activities.id"))
+
+    # used     — sent as written. A positive signal, and the only one there is.
+    # edited   — sent, but changed. The most informative outcome.
+    # unused   — not sent at all.
+    # skipped  — declined to say. Recorded so the question stops being asked.
+    outcome = Column(String, index=True)
+
+    draft_subject = Column(String)
+    draft_body = Column(Text)
+    final_subject = Column(String)
+    final_body = Column(Text)
+    reason = Column(Text)
+
+    # Denormalised on purpose: re-categorising a company later must not silently
+    # retag what was true when the draft was written.
+    vertical = Column(String)
+
+    provider = Column(String)
+    model = Column(String)
+    # Which ProfileEntry ids were in the prompt that produced this draft, so
+    # "which memory influenced this" is answerable after the fact.
+    profile_applied = Column(String)
+
+    created_at = Column(DateTime, default=utcnow, index=True)
+
+    @property
+    def changed(self):
+        return self.outcome == "edited"
+
+    @property
+    def word_delta(self):
+        """How much shorter or longer what you sent was. None unless edited."""
+        if not (self.draft_body and self.final_body):
+            return None
+        return len(self.final_body.split()) - len(self.draft_body.split())

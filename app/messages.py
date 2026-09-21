@@ -165,7 +165,7 @@ def reject_reason(comment):
     return None
 
 
-def _post_context(person, activity):
+def _post_context(person, activity, db=None):
     bits = [
         f"Person: {person.full_name}",
         f"Their title: {person.title or 'unknown'}",
@@ -178,13 +178,69 @@ def _post_context(person, activity):
         labels = ", ".join(i.label for i in person.interests if i.label)
         if labels:
             bits.append(f"Known interests: {labels}")
+    sent = _already_sent(db, person, "comment")
+    if sent:
+        bits.append("")
+        bits.append("Already sent to this contact — do not repeat it:")
+        bits.extend(sent)
     bits.append("")
     bits.append("Post text (this is all you may reference):")
     bits.append(substance_of(activity.text))
     return "\n".join(bits)
 
 
-def suggest_comment(person, activity, model=None, base_url=None, api_key=None):
+def _profile_block(db, person, kind):
+    """The sender's profile, rendered for this draft. "" when there is none.
+
+    Wrapped so a profile problem can never stop a draft: the memory is an
+    improvement to the copy, not a prerequisite for it.
+    """
+    if db is None:
+        return ""
+    try:
+        from . import profile
+        return profile.render(db, person, kind)
+    except Exception:
+        return ""
+
+
+def _banned_from_profile(db, kind):
+    if db is None:
+        return ()
+    try:
+        from . import profile
+        return profile.banned_patterns(db, kind)
+    except Exception:
+        return ()
+
+
+def _already_sent(db, person, kind, limit=3):
+    """What has already gone to this contact, so a second touch does not
+    repeat the first.
+
+    Rides in the user message rather than the system prompt: it is research
+    about this one lead, not a standing instruction.
+    """
+    if db is None or person is None:
+        return []
+    try:
+        from .models import DraftFeedback
+        rows = (db.query(DraftFeedback)
+                .filter(DraftFeedback.person_id == person.id,
+                        DraftFeedback.outcome.in_(("used", "edited")))
+                .order_by(DraftFeedback.created_at.desc()).limit(limit).all())
+    except Exception:
+        return []
+    out = []
+    for row in rows:
+        text = (row.final_body or row.draft_body or "").strip()
+        if text:
+            out.append(f"- [{row.kind}] {text[:400]}")
+    return out
+
+
+def suggest_comment(person, activity, model=None, base_url=None, api_key=None,
+                    db=None):
     """Returns {"comment", "model", "generated_at"} or {"reason": "..."}.
 
     Raises LLMNotConfigured when no endpoint is set. A thin post returns a
@@ -211,21 +267,28 @@ def suggest_comment(person, activity, model=None, base_url=None, api_key=None):
     # the fallback so an install without the skill folder still drafts rather
     # than failing — the rules it carries are the same ones, written before the
     # brief existed.
+    #
+    # `db` is optional so the function still works without one; with it, the
+    # sender's profile rides along and the draft is written in their voice
+    # rather than the brief's default.
+    memory = _profile_block(db, person, "comment")
     try:
-        system = _skills.comment_system()
+        system = _skills.comment_system(memory=memory)
         from_skill = True
     except (_skills.SkillMissing, OSError):
         system, from_skill = SYSTEM, False
 
     parsed, model = _llm.json_call(
-        system, _post_context(person, activity), schema=schema)
+        system, _post_context(person, activity, db=db), schema=schema)
     if parsed is None:
         return {"reason": "the model returned nothing usable"}
 
-    # The brief bans a set of comment openers by name. Checked here rather than
-    # only asked for, the same way reject_reason already checks BANNED_PHRASES.
+    # The brief bans a set of comment openers by name, and so may the sender's
+    # own profile. Checked here rather than only asked for, the same way
+    # reject_reason already checks BANNED_PHRASES.
     if from_skill:
-        hit = _skills.banned_hits(parsed.get("comment") or "", "comment")
+        hit = _skills.banned_hits(parsed.get("comment") or "", "comment",
+                                  extra=_banned_from_profile(db, "comment"))
         if hit:
             return {"reason": f"draft discarded - the brief bans {hit[0]!r}"}
 
@@ -261,7 +324,7 @@ def draft_for_person(db, person, force=False, limit=None):
 
     for activity in rows:
         try:
-            result = suggest_comment(person, activity)
+            result = suggest_comment(person, activity, db=db)
         except LLMNotConfigured:
             raise
         except Exception as exc:
@@ -1028,7 +1091,7 @@ EMAIL_SCHEMA = {
 }
 
 
-def email_research(person):
+def email_research(person, db=None):
     """Everything the brief's Step 1 asks to be given, and nothing invented.
 
     Each line is labelled with where it came from, because the brief's
@@ -1072,20 +1135,32 @@ def email_research(person):
             bits.append(f"Interests inferred from that activity: {labels}")
 
     bits.append("")
+    sent = _already_sent(db, person, "email")
+    if sent:
+        bits.append("")
+        bits.append("Already sent to this contact - do not repeat it:")
+        bits.extend(sent)
+
+    bits.append("")
     bits.append("Sign the email as: " + sender()["name"])
     return "\n".join(bits)
 
 
-def skill_email(person):
+def skill_email(person, db=None):
     """Draft one personalised cold email under the brief in skills/.
 
     Returns {"subject", "body", "signal", "opportunity", "confidence", "why",
     "model", "generated_at", "words"} or {"reason": "..."}.
 
+    `db` is optional. With it, the sender's profile is rendered into the system
+    prompt and what has already been sent to this contact into the research —
+    so the draft is written in their voice and does not repeat the last touch.
+
     Raises LLMNotConfigured when no provider has a key.
     """
-    system = _skills.email_system()          # SkillMissing propagates
-    parsed, model = _llm.json_call(system, email_research(person),
+    memory = _profile_block(db, person, "email")
+    system = _skills.email_system(memory=memory)   # SkillMissing propagates
+    parsed, model = _llm.json_call(system, email_research(person, db=db),
                                    schema=EMAIL_SCHEMA)
     if parsed is None:
         return {"reason": "the model returned nothing usable"}
@@ -1108,7 +1183,9 @@ def skill_email(person):
         return {"reason": f"draft discarded - {words} words against the brief's "
                           f"{low}-{high}"}
 
-    hit = _skills.banned_hits(body, "email") or _skills.banned_hits(subject, "email")
+    extra = _banned_from_profile(db, "email")
+    hit = (_skills.banned_hits(body, "email", extra=extra)
+           or _skills.banned_hits(subject, "email", extra=extra))
     if hit:
         return {"reason": f"draft discarded - the brief bans {hit[0]!r}"}
 

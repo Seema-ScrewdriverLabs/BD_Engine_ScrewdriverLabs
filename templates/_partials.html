@@ -486,6 +486,10 @@
             {%- if a.suggested_model %} · {{ a.suggested_model }}{% endif %}
             {%- if a.suggested_at %} · {{ a.suggested_at|short_date }}{% endif %}.
             Nothing is posted automatically.</p>
+          {{ draft_feedback_bar('comment', a.id,
+                                person.feedback_for('comment', activity_id=a.id),
+                                '/person/' ~ person.slug ~ '#linkedin',
+                                '', a.suggested_comment or '') }}
         </div>
         {% elif a.suggested_note %}
         <div class="mt-2 rounded-xl border border-[#EFEFF2] bg-[#FAFAFB] px-2.5 py-2">
@@ -846,6 +850,102 @@
 {% endif %}
 {% endmacro %}
 
+{# ---------------------------------------------------------------------------
+   Did you use it?
+
+   Shown under a draft, once, until it is answered. The app has no other way to
+   find out: the textarea above is a scratchpad with no name and no form, the
+   copy button never reaches the server, and marking a step done says nothing
+   about whether the words were the app's or yours.
+
+   Four answers, and one of them is Skip — a question you cannot decline is an
+   interrogation, and the whole point is that answering has to be cheaper than
+   ignoring. Skip is recorded so the same draft stops asking.
+
+   `ref` is the OutreachStep id for an email and the LinkedInActivity id for a
+   comment, because the two drafting paths store their output in two different
+   tables.
+--------------------------------------------------------------------------- #}
+{% macro draft_feedback_bar(kind, ref, answered, back, draft_subject='', draft_body='') %}
+{% if feedback_on() %}
+{% if answered %}
+<p class="text-[10.5px] text-ink-faint mt-2 pt-2 border-t border-[#F2F2F5]">
+  {% if answered.outcome == 'used' %}You sent this as written.
+  {% elif answered.outcome == 'edited' %}You changed this before sending{% if answered.word_delta is not none %} ({{ answered.word_delta }} words){% endif %}.
+  {% elif answered.outcome == 'unused' %}You did not use this.
+  {% else %}Not answered.{% endif %}
+  <a href="/profile" class="text-violet2-600 hover:underline">Profile</a>
+</p>
+{% else %}
+<div class="mt-2 pt-2 border-t border-[#F2F2F5]">
+  <p class="text-[11px] text-ink-soft mb-1.5">Did you use this? It is how the drafts get closer to your voice.</p>
+  <div class="flex items-center gap-1.5 flex-wrap">
+    <form method="post" action="/feedback/{{ kind }}/{{ ref }}">
+      <input type="hidden" name="back" value="{{ back }}">
+      <input type="hidden" name="outcome" value="used">
+      <button class="h-7 px-2.5 rounded-lg bg-violet2-600 hover:bg-violet2-700 text-white text-[11.5px] font-medium">Used it as-is</button>
+    </form>
+    <form method="post" action="/feedback/{{ kind }}/{{ ref }}">
+      <input type="hidden" name="back" value="{{ back }}">
+      <input type="hidden" name="outcome" value="skipped">
+      <button class="h-7 px-2 text-[11px] text-ink-faint hover:text-rose-600">Skip</button>
+    </form>
+  </div>
+
+  {# The two answers that need more than a click. A details block because it is
+     the app's only existing reveal-a-form pattern, and because the textarea
+     below has to arrive pre-filled — the fastest edit to describe is the one
+     you have already made. #}
+  <details class="group mt-1.5">
+    <summary class="list-none cursor-pointer inline-flex items-center gap-1 text-[11.5px] font-medium text-violet2-600 hover:text-violet2-700">
+      <svg class="w-3 h-3 transition-transform group-open:rotate-45" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+      I changed it, or did not use it
+    </summary>
+    <form method="post" action="/feedback/{{ kind }}/{{ ref }}" class="mt-2 rounded-xl bg-[#FAFAFB] border border-[#EFEFF2] p-3">
+      <input type="hidden" name="back" value="{{ back }}">
+      {% if kind == 'email' %}
+      <label class="block mb-2">
+        <span class="block text-[11px] text-ink-faint mb-1">Subject you actually sent</span>
+        <input name="final_subject" value="{{ draft_subject }}"
+               class="w-full h-8 px-2.5 rounded-lg bg-white border border-[#E2E3E8] text-[12.5px] outline-none focus:border-violet2-300">
+      </label>
+      {% endif %}
+      <label class="block">
+        <span class="block text-[11px] text-ink-faint mb-1">What you actually sent <span class="text-ink-faint/70">— edit this to match, or clear it if you sent nothing</span></span>
+        <textarea name="final_body" rows="5"
+                  class="w-full px-2.5 py-2 rounded-lg bg-white border border-[#E2E3E8] text-[12.5px] leading-relaxed outline-none focus:border-violet2-300 resize-y">{{ draft_body }}</textarea>
+      </label>
+      <label class="block mt-2">
+        <span class="block text-[11px] text-ink-faint mb-1">What made you change it? <span class="text-ink-faint/70">— one line is plenty, and it is the most useful part</span></span>
+        <input name="reason" placeholder="e.g. too long, and the opener was about us not them"
+               class="w-full h-8 px-2.5 rounded-lg bg-white border border-[#E2E3E8] text-[12.5px] outline-none focus:border-violet2-300">
+      </label>
+      <div class="flex items-center gap-2 mt-2.5">
+        <button name="outcome" value="edited"
+                class="h-8 px-3 rounded-lg bg-violet2-600 hover:bg-violet2-700 text-white text-[12px] font-medium">Save what I sent</button>
+        <button name="outcome" value="unused"
+                class="h-8 px-3 rounded-lg border border-[#EAEBEF] text-[12px] text-ink-soft hover:text-rose-600 hover:bg-white">I did not use it</button>
+      </div>
+    </form>
+  </details>
+</div>
+{% endif %}
+{% endif %}
+{% endmacro %}
+
+
+{# The green counterpart to outreach_error_banner. Same self-guarding shape, so
+   callers invoke it unconditionally. #}
+{% macro outreach_ok_banner(message) %}
+{% if message %}
+<div class="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2.5 flex items-start gap-2.5">
+  <svg class="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
+  <p class="text-[12.5px] text-emerald-900 leading-relaxed">{{ message }}</p>
+</div>
+{% endif %}
+{% endmacro %}
+
+
 
 {% macro outreach_state_badge(step) %}
 {% set styles = {
@@ -1146,7 +1246,7 @@
    The drafted comment for a comment step. Shared, because the list row and the
    task dialog both want it and neither should own it.
 --------------------------------------------------------------------------- #}
-{% macro outreach_comment_draft(step, rows=2) %}
+{% macro outreach_comment_draft(step, rows=2, back='') %}
 {% set drafted = step.person.activities|selectattr('suggested_comment')|list %}
 {% if drafted %}
 {% set pick = drafted[0] if step.step_key == 'comment_1' else (drafted[1] if drafted|length > 1 else drafted[0]) %}
@@ -1158,6 +1258,9 @@
     {{ copy_button() }}
   </div>
   <textarea rows="{{ rows }}" class="w-full resize-y rounded-lg bg-white border border-violet2-100 px-2.5 py-1.5 text-[12.5px] leading-relaxed outline-none focus:border-violet2-200">{{ pick.suggested_comment }}</textarea>
+  {{ draft_feedback_bar('comment', pick.id,
+                        step.person.feedback_for('comment', activity_id=pick.id),
+                        back, '', pick.suggested_comment or '') }}
 </div>
 {% else %}
 <p class="text-[11.5px] text-ink-faint">No comment drafted yet — open
@@ -1220,6 +1323,8 @@
     {% if written.basis %}
     <p class="text-[10.5px] text-ink-faint mt-0.5">{{ written.basis }}</p>
     {% endif %}
+    {{ draft_feedback_bar('email', step.id, step.person.feedback_for('email', step_key=step.step_key),
+                          back, written.subject or '', written.body or '') }}
   </div>
   {% elif step.person.draft_note %}
   <p class="text-[12px] text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 mb-2">{{ step.person.draft_note }}</p>
@@ -1516,7 +1621,7 @@
        here. Gating both on one flag hid the email entirely on the person
        page. #}
     {% if show_draft and step.step_key in ('comment_1', 'comment_2') %}
-    <div class="mt-2">{{ outreach_comment_draft(step) }}</div>
+    <div class="mt-2">{{ outreach_comment_draft(step, back=back) }}</div>
     {% elif step.step_key == 'email' %}
     <div class="mt-2">{{ outreach_email_draft(step, back, prefs) }}</div>
     {% endif %}
@@ -1624,7 +1729,7 @@
 
       {# ---- what to say ---- #}
       {% if step.step_key in ('comment_1', 'comment_2') %}
-      <div class="mt-3">{{ outreach_comment_draft(step, rows=3) }}</div>
+      <div class="mt-3">{{ outreach_comment_draft(step, rows=3, back=back ~ '#task-' ~ person.slug) }}</div>
       {% elif step.step_key == 'email' %}
       <div class="mt-3">{{ outreach_email_draft(step, back ~ '#task-' ~ person.slug, prefs) }}</div>
       {% endif %}

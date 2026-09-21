@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% import "_partials.html" as ui %}
+{% block title %}Profile — PeopleIntel{% endblock %}
+
+{% macro entry_row(e, dim=False) %}
+<div class="flex items-start justify-between gap-3 py-2.5 border-b border-[#F2F2F5] last:border-0">
+  <div class="min-w-0">
+    <p class="text-[13px] {{ 'text-ink-faint' if dim else '' }}">{{ e.text }}</p>
+    <p class="text-[11px] text-ink-faint mt-0.5">
+      {% if e.locked %}
+      <span class="font-medium text-emerald-700">you told it</span>
+      {% else %}
+      worked out from your edits · seen {{ e.times_seen }}x
+      {% endif %}
+      {% if e.scope != 'global' %} · {{ e.scope_label }}{% endif %}
+      {% if e.applies_to != 'both' %} · {{ e.applies_to }} only{% endif %}
+      {% if e.mechanical %} · <span class="text-violet2-600">enforced in code</span>{% endif %}
+    </p>
+    {% if e.evidence and not e.locked %}
+    <p class="text-[11px] text-ink-faint/80 mt-1 italic">{{ e.evidence }}</p>
+    {% endif %}
+  </div>
+  <div class="flex items-center gap-1.5 shrink-0">
+    <form method="post" action="/profile/{{ e.id }}/toggle">
+      <button class="h-7 px-2.5 rounded-lg border border-[#EAEBEF] text-[11.5px] text-ink-soft hover:bg-[#FAFAFB]">{{ 'Turn off' if e.active else 'Turn on' }}</button>
+    </form>
+    <form method="post" action="/profile/{{ e.id }}/delete">
+      <button class="h-7 px-2 rounded-lg text-[11.5px] text-ink-faint hover:text-rose-600">Delete</button>
+    </form>
+  </div>
+</div>
+{% endmacro %}
+
+{% block content %}
+<div class="max-w-[820px] mx-auto space-y-4">
+  <div>
+    <h1 class="text-[22px] font-bold tracking-tight">Profile</h1>
+    <p class="text-[13px] text-ink-faint mt-0.5">What the app knows about how you write. A model remembers nothing between calls, so this is handed to it fresh every time a draft is written.</p>
+  </div>
+
+  {{ ui.outreach_ok_banner(profile_ok) }}
+
+  {# ------------------------------------------------------ tell it directly #}
+  <section class="card shadow-card p-5">
+    <h3 class="text-[15px] font-bold mb-1">Tell it something</h3>
+    <p class="text-[12px] text-ink-faint mb-3">Goes straight in and applies to the next draft. Anything you state here outranks anything it worked out on its own.</p>
+    <form method="post" action="/profile/add" class="flex items-end gap-2 flex-wrap">
+      <label class="flex-1 min-w-[260px]">
+        <span class="block text-[11.5px] text-ink-faint mb-1">A preference, or a fact about you</span>
+        <input name="text" required placeholder="e.g. Keep emails under 90 words"
+               class="w-full h-9 px-3 rounded-lg bg-white border border-[#E2E3E8] text-[13px] outline-none focus:border-violet2-300">
+      </label>
+      <label class="block">
+        <span class="block text-[11.5px] text-ink-faint mb-1">Kind</span>
+        <select name="category" class="h-9 px-2 rounded-lg bg-white border border-[#E2E3E8] text-[13px] outline-none focus:border-violet2-300">
+          <option value="preference">Preference</option>
+          <option value="fact">Fact about me</option>
+        </select>
+      </label>
+      <button class="h-9 px-4 rounded-lg bg-violet2-600 hover:bg-violet2-700 text-white text-[13px] font-medium">Add</button>
+    </form>
+  </section>
+
+  {# ------------------------------------------------------------ what it has #}
+  {% set any_active = grouped.values()|map('length')|sum > 0 %}
+  {% if any_active %}
+  {% for cat in order %}
+  {% if grouped.get(cat) %}
+  <section class="card shadow-card p-5">
+    <h3 class="text-[15px] font-bold mb-0.5">{{ labels[cat] }}</h3>
+    <p class="text-[11.5px] text-ink-faint mb-2">
+      {% if cat == 'fact' %}Who the drafts are signed by.
+      {% elif cat == 'preference' %}Stated by you. Never retired automatically.
+      {% elif cat == 'behaviour' %}Seen at least {{ confirm_at }} times before it counts.
+      {% else %}One rolling summary, rewritten as the log grows.{% endif %}
+    </p>
+    {% for e in grouped[cat] %}{{ entry_row(e) }}{% endfor %}
+  </section>
+  {% endif %}
+  {% endfor %}
+  {% else %}
+  <section class="card shadow-card p-5">
+    <div class="rounded-xl border border-dashed border-[#DEDFE4] bg-[#FAFAFB] px-4 py-6 text-center">
+      <p class="text-[13px] font-medium">Nothing learned yet</p>
+      <p class="text-[12.5px] text-ink-faint mt-1 max-w-md mx-auto">
+        {% if answered %}{{ answered }} answer{{ 's' if answered != 1 }} so far. A pattern has to show up {{ confirm_at }} times before it is used, so one edit is not enough on its own.
+        {% else %}Draft an email or a comment, then say whether you used it. That is the whole input.{% endif %}
+      </p>
+    </div>
+  </section>
+  {% endif %}
+
+  {# ----------------------------------------------------------- not yet used #}
+  {% if pending %}
+  <section class="card shadow-card p-5">
+    <h3 class="text-[15px] font-bold mb-0.5">Seen once, not yet used</h3>
+    <p class="text-[11.5px] text-ink-faint mb-2">One edit could be a one-off, so these are held back until a second edit says the same thing. Turn one on to use it now.</p>
+    {% for e in pending %}{{ entry_row(e, dim=True) }}{% endfor %}
+  </section>
+  {% endif %}
+
+  {# ------------------------------------------------------------- the switch #}
+  <section class="card shadow-card p-5 bg-[#FAFAFB]">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="text-[15px] font-bold mb-0.5">Asking after each draft</h3>
+        <p class="text-[12px] text-ink-soft">{{ 'On — the question appears under every draft.' if asking else 'Off — no question, and nothing new is learned.' }} Answers already on file are kept either way.</p>
+      </div>
+      <form method="post" action="/profile/asking" class="shrink-0">
+        <button class="h-9 px-4 rounded-lg border border-[#EAEBEF] text-[12.5px] font-medium text-ink-soft hover:bg-white">{{ 'Turn off' if asking else 'Turn on' }}</button>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock %}

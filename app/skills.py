@@ -159,7 +159,19 @@ or result in it gets comment: null, not a comment written to fill the slot.
 """
 
 
-def email_system(directory=None):
+# The sender's profile, when there is one. Passed in already rendered rather
+# than looked up here, because this module reads files and nothing else — the
+# database belongs to app/profile.py, which builds the block and hands it over.
+_MEMORY_HEADER = "=== WHAT WE KNOW ABOUT THE SENDER ==="
+
+_MEMORY_NOTE = (
+    "This is what the person sending has said and what their past edits show. "
+    "It describes the sender, never the recipient, and it does not override "
+    "the brief above — where the two disagree, the brief wins."
+)
+
+
+def email_system(directory=None, memory=""):
     """The system prompt for drafting one cold email."""
     d = load(directory)
     parts = ["You are drafting outbound copy for Screwdriver Films. The rules "
@@ -169,6 +181,8 @@ def email_system(directory=None):
         parts += ["", "=== VOICE AND FORMAT ===", d["voice"]]
     if d["knowledge"]:
         parts += ["", "=== WHAT SCREWDRIVER DOES ===", d["knowledge"]]
+    if memory and memory.strip():
+        parts += ["", _MEMORY_HEADER, _MEMORY_NOTE, "", memory.strip()]
     parts += ["",
               "You are doing Task 1 (the email) only. Ignore the LinkedIn "
               "comment task and the Markdown report format in the brief — the "
@@ -177,7 +191,7 @@ def email_system(directory=None):
     return "\n".join(parts)
 
 
-def comment_system(directory=None):
+def comment_system(directory=None, memory=""):
     """The system prompt for drafting one LinkedIn comment on one post."""
     d = load(directory)
     parts = ["You are drafting outbound copy for Screwdriver Films. The rules "
@@ -185,6 +199,8 @@ def comment_system(directory=None):
              "", "=== THE BRIEF ===", d["skill"]]
     if d["voice"]:
         parts += ["", "=== VOICE AND FORMAT ===", d["voice"]]
+    if memory and memory.strip():
+        parts += ["", _MEMORY_HEADER, _MEMORY_NOTE, "", memory.strip()]
     parts += ["",
               "You are doing Task 2 (comments) only, for ONE post, and the "
               "brief's Markdown report format is replaced by the schema below. "
@@ -207,11 +223,16 @@ def word_count(text):
     return len((text or "").split())
 
 
-def banned_hits(text, section="email"):
-    """Which banned phrases from voice-and-format.md appear in `text`.
+def banned_hits(text, section="email", extra=()):
+    """Which banned phrases appear in `text`.
 
     Read out of the Markdown rather than duplicated into Python, so editing the
     list in the file is enough — the checker cannot fall behind the brief.
+
+    `extra` carries phrases the sender's own profile has banned (a mechanical
+    ProfileEntry). Passed in rather than looked up, because this module does
+    not touch the database. The point of enforcing them here is that a rule
+    only requested in a prompt is a rule that holds most of the time.
     """
     try:
         voice = load()["voice"]
@@ -236,6 +257,8 @@ def banned_hits(text, section="email"):
             quoted = quoted.strip().strip(".!")
             if len(quoted) >= 4:
                 phrases.append(quoted.lower())
+
+    phrases += [p.strip().lower() for p in (extra or []) if p and len(p) >= 4]
 
     low = (text or "").lower()
     return sorted({p for p in phrases if p in low})
