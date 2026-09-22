@@ -330,6 +330,21 @@ def slugify(name, existing):
     return slug
 
 
+def _li_key(url):
+    """A LinkedIn profile URL reduced to the part that identifies the person.
+
+    /in/jane-smith/ and https://www.linkedin.com/in/jane-smith?x=1 are the same
+    profile, so the comparison is on the slug rather than the raw string.
+    """
+    if not url:
+        return ""
+    low = url.strip().lower().split("?")[0].rstrip("/")
+    marker = "/in/"
+    if marker not in low:
+        return ""
+    return low.rsplit(marker, 1)[-1]
+
+
 def import_csv(db, file_bytes, filename="upload.csv"):
     """Returns a summary dict that feeds the stat tiles."""
     if file_bytes[:2] in (b"\xff\xfe", b"\xfe\xff"):
@@ -346,7 +361,16 @@ def import_csv(db, file_bytes, filename="upload.csv"):
         return {"total": 0, "imported": 0, "needs_enrichment": 0, "failed": 0,
                 "errors": ["Could not decode the file — is it a CSV?"]}
 
-    fieldnames, notes, rows = read_rows(text)
+    try:
+        fieldnames, notes, rows = read_rows(text)
+    except csv.Error as exc:
+        # A binary file often decodes as latin-1 without complaint, and only
+        # blows up here when the csv module meets a raw newline mid-field.
+        # Uploading an .xlsx is an easy mistake and used to 500 the page.
+        return {"total": 0, "imported": 0, "needs_enrichment": 0, "failed": 0,
+                "filename": filename,
+                "errors": [f"That file is not a CSV the importer can read "
+                           f"({exc})."]}
     if not fieldnames:
         return {"total": 0, "imported": 0, "needs_enrichment": 0, "failed": 0,
                 "errors": ["The file has no header row."]}
@@ -365,10 +389,18 @@ def import_csv(db, file_bytes, filename="upload.csv"):
     # should update them, not create a second copy. Without this, uploading the
     # same file three times leaves three of everybody, with -2 and -3 slugs, and
     # every later research run pays for each copy.
-    by_apollo_id = {
-        p.apollo_contact_id: p
-        for p in db.query(Person).all() if p.apollo_contact_id
-    }
+    everyone = db.query(Person).all()
+    by_apollo_id = {p.apollo_contact_id: p
+                    for p in everyone if p.apollo_contact_id}
+
+    # Exports that carry no Apollo Contact Id still identify a person: an email
+    # address and a LinkedIn profile URL are both unique to one human. Without
+    # these, re-uploading such a file left a second and third copy of everybody
+    # with -2 and -3 slugs, and every later research run paid for each copy.
+    by_email = {p.email.strip().lower(): p
+                for p in everyone if p.email and p.email.strip()}
+    by_linkedin = {_li_key(p.linkedin_url): p
+                   for p in everyone if _li_key(p.linkedin_url)}
 
     # Fields the CSV owns. Research lives elsewhere on the row and is untouched.
     CSV_FIELDS = (
@@ -430,6 +462,15 @@ def import_csv(db, file_bytes, filename="upload.csv"):
 
             apollo_id = _get(row, colmap, "apollo_contact_id")
             known = by_apollo_id.get(apollo_id) if apollo_id else None
+            if known is None:
+                # Tried in order of how strongly each identifies one person.
+                row_email = (_get(row, colmap, "email") or "").strip().lower()
+                if row_email:
+                    known = by_email.get(row_email)
+                if known is None:
+                    row_li = _li_key(_get(row, colmap, "linkedin_url"))
+                    if row_li:
+                        known = by_linkedin.get(row_li)
             if known is not None:
                 # Same person, fresher row. Keep the slug so existing links and
                 # any research attached to this contact survive.

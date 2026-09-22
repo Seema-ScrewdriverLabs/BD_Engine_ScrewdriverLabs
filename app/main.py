@@ -90,7 +90,33 @@ def money(value):
 templates.env.filters["relative_time"] = relative_time
 templates.env.filters["domain"] = domain_of
 templates.env.filters["short_date"] = short_date
+def safe_url(value):
+    """A URL safe to put in an href, or "" .
+
+    An activity URL is typed in by hand, and `javascript:` in an href runs in
+    this page's origin the moment someone clicks it. Jinja's escaping does not
+    help — the string is perfectly valid markup, it is the scheme that is the
+    problem. Filtered at render so rows already stored are covered too, not
+    only ones saved from now on.
+    """
+    if not value:
+        return ""
+    text = str(value).strip()
+    # Control characters and whitespace are stripped first: "java\tscript:" and
+    # "  javascript:" are both accepted by browsers as the same scheme.
+    probe = "".join(ch for ch in text if ch.isprintable() and not ch.isspace())
+    low = probe.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return text
+    if "//" in low[:12] and ":" not in low.split("//")[0]:
+        return text                      # a protocol-relative //host/path
+    if ":" not in low.split("/")[0]:
+        return text                      # a relative path, no scheme at all
+    return ""
+
+
 templates.env.filters["money"] = money
+templates.env.filters["safe_url"] = safe_url
 
 
 # ------------------------------------------------------- template globals
@@ -305,6 +331,8 @@ def people_list(request: Request, db: Session = Depends(get_session),
 # without these the form just silently did nothing.
 ACTIVITY_ERRORS = {
     "max5": "Five activities is the cap — remove one before adding another.",
+    "badurl": "A link has to start with http:// or https://. That one was "
+              "left out; the activity was not saved.",
     "badtype": "That activity type isn't one of Post, Repost, Comment or Tagged.",
     "nores": "Research is already running or already done for this contact. "
              "Re-running costs API credits — use run_pipeline.py --force.",
@@ -535,6 +563,11 @@ def add_activity(slug: str, activity_type: str = Form(...), url: str = Form(""),
     # An unknown type would store a row the panel can't label or colour.
     if activity_type not in ACTIVITY_LABELS:
         return RedirectResponse(f"/person/{slug}?err=badtype", status_code=303)
+    # Refuse a scheme that would be dangerous in an href. safe_url filters it
+    # again at render for rows already stored, but there is no reason to keep
+    # accepting new ones.
+    if url.strip() and not safe_url(url):
+        return RedirectResponse(f"/person/{slug}?err=badurl", status_code=303)
 
     parsed = None
     if activity_date:
@@ -971,9 +1004,17 @@ def draft_feedback(kind: str, ref_id: int,
 
     target = _safe_back(back, f"/person/{person.slug}#outreach")
 
-    row = DraftFeedback(
-        person=person, kind=kind, step_key=step_key, activity_id=activity_id,
-        outcome=outcome,
+    # One answer per draft. The bar hides itself once answered, but a
+    # double-submitted form or a re-posted request would otherwise store a
+    # second row — and every row feeds the profile, so duplicates would weight
+    # one opinion three times.
+    row = person.feedback_for(kind, step_key=step_key, activity_id=activity_id)
+    if row is None:
+        row = DraftFeedback(person=person, kind=kind, step_key=step_key,
+                            activity_id=activity_id)
+        db.add(row)
+    _fill(
+        row, outcome=outcome,
         draft_subject=draft_subject, draft_body=draft_body,
         final_subject=(final_subject or "").strip() or None,
         final_body=(final_body or "").strip() or None,
@@ -986,7 +1027,6 @@ def draft_feedback(kind: str, ref_id: int,
     # rather than inventing a change that was never made.
     if outcome == "edited" and not row.final_body:
         row.outcome = "used"
-    db.add(row)
     db.commit()
 
     if row.outcome == "skipped":
@@ -997,6 +1037,17 @@ def draft_feedback(kind: str, ref_id: int,
     learned = profile.observe(db, row)
     return RedirectResponse(
         _with_ok(target, "learned" if learned else "noted"), status_code=303)
+
+
+def _fill(row, **values):
+    """Set these fields on a feedback row, new or existing.
+
+    Answering again replaces the earlier answer rather than adding a second
+    one — the later answer is the one the person means.
+    """
+    for name, value in values.items():
+        setattr(row, name, value)
+    return row
 
 
 def _vertical_key(person):
