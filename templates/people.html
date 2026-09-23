@@ -63,7 +63,8 @@
   </p>
 
   <section class="card shadow-card overflow-hidden">
-    {{ ui.people_table(people, link_full=True, show_segments=True) }}
+    {{ ui.people_table(people, link_full=True, show_segments=True,
+                   back='/people') }}
   </section>
 </div>
 {% endblock %}

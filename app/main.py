@@ -17,10 +17,11 @@ from .models import (
     RESEARCH_DONE, RESEARCH_FAILED, RESEARCH_RUNNING,
     ProfileEntry, DraftFeedback, CATEGORY_LABELS,
     ACTIVITY_LABELS,
+    Import,
 )
 from .env import status as env_status
 from . import env as env_module
-from . import llm
+from . import apify, llm
 from . import skills
 from . import profile
 from . import pipeline
@@ -128,6 +129,8 @@ templates.env.filters["safe_url"] = safe_url
 # the result can never disagree about what a length or a tone is.
 templates.env.globals.update(
     COMMENT_LENGTHS=messages.COMMENT_LENGTHS,
+    COMMENT_TONES=messages.COMMENT_TONES,
+    DEFAULT_COMMENT_TONE=messages.DEFAULT_COMMENT_TONE,
     EMAIL_TONES=messages.EMAIL_TONES,
     EMAIL_LENGTHS=messages.EMAIL_LENGTHS,
     DEFAULT_COMMENT_LENGTH=messages.DEFAULT_COMMENT_LENGTH,
@@ -141,6 +144,10 @@ templates.env.globals.update(
     llm_ready=llm.configured,
     skill_ready=skills.available,
     feedback_on=profile.enabled,
+    SKILL_TONES_UI=messages.SKILL_TONES,
+    SKILL_LENGTHS=messages.SKILL_LENGTHS,
+    DEFAULT_SKILL_TONE=messages.DEFAULT_SKILL_TONE,
+    DEFAULT_SKILL_LENGTH=messages.DEFAULT_SKILL_LENGTH,
     TIER_LABELS=personalisation.TIER_LABELS,
     # The outreach email is composed on read, so the panel calls the composer
     # directly with whatever tone and length the reader picked. Nothing is
@@ -204,6 +211,21 @@ def _safe_back(back, fallback):
     return back if back.startswith("/") and not back.startswith("//") else fallback
 
 
+def _with_params(target, **kw):
+    """`target` with query parameters added, placed before any #fragment.
+
+    Same splitting rule as _with_err, and for the same reason: appending after
+    the anchor makes the whole thing a fragment and nothing ever reads it.
+    Empty values are dropped rather than written as blanks.
+    """
+    path, sep, fragment = target.partition("#")
+    for key, value in kw.items():
+        if not value:
+            continue
+        path += ("&" if "?" in path else "?") + f"{key}={value}"
+    return f"{path}{sep}{fragment}"
+
+
 def _with_err(target, code):
     """`target` with ?err=code added, placed before any #fragment.
 
@@ -247,6 +269,29 @@ templates.env.globals["form_target"] = form_target
 
 def people_q(db):
     return db.query(Person).options(joinedload(Person.company)).order_by(Person.id)
+
+
+@app.middleware("http")
+async def no_store_html(request, call_next):
+    """Never let a browser cache a page.
+
+    Every page here renders live state — research status, draft options, step
+    due dates — and none of it carries a validator the browser could check.
+    Without a header the browser applies heuristic caching, so the GET that
+    follows a 303 can come from the cache: press Research, and the row you
+    return to still says "Not researched" because the copy on screen predates
+    the run. Waiting does not help, and neither does the auto-refresh, since
+    its reload is served from the same cache.
+
+    Only HTML is covered. /static is content-addressed and must stay cacheable
+    or every page load re-downloads the stylesheet.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static"):
+        return response
+    if "text/html" in (response.headers.get("content-type") or ""):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
 
 
 @app.on_event("startup")
@@ -334,6 +379,10 @@ ACTIVITY_ERRORS = {
     "badurl": "A link has to start with http:// or https://. That one was "
               "left out; the activity was not saved.",
     "badtype": "That activity type isn't one of Post, Repost, Comment or Tagged.",
+    "nobatch": "Every contact on this list has already been researched, or "
+               "is running now.",
+    "batchrunning": "A batch is already running. Let it finish, or stop it "
+                    "first.",
     "nores": "Research is already running or already done for this contact. "
              "Re-running costs API credits — use run_pipeline.py --force.",
     "nolirefresh": "LinkedIn is already refreshing, or this contact hasn't "
@@ -364,7 +413,7 @@ OUTREACH_ERRORS = {
 
 @app.get("/person/{slug}", response_class=HTMLResponse)
 def person_page(slug: str, request: Request, err: str = "",
-                tone: str = "", length: str = "",
+                tone: str = "", length: str = "", wt: str = "", wl: str = "",
                 db: Session = Depends(get_session)):
     person = db.query(Person).filter(Person.slug == slug).first()
     if not person:
@@ -374,7 +423,7 @@ def person_page(slug: str, request: Request, err: str = "",
         ctx(request, db, nav="people", person=person, full_page=True,
             activity_error=ACTIVITY_ERRORS.get(err),
             outreach_error=OUTREACH_ERRORS.get(err),
-            mail_prefs={"tone": tone, "length": length}),
+            mail_prefs={"tone": tone, "length": length, "wt": wt, "wl": wl}),
     )
 
 
@@ -421,12 +470,87 @@ def research(request: Request, db: Session = Depends(get_session)):
     } for p in people]
     rows.sort(key=lambda r: -(r["activities"] * 10 + r["interests"]))
     return templates.TemplateResponse(
-        request, "research.html", ctx(request, db, nav="research", rows=rows)
+        request, "research.html",
+        ctx(request, db, nav="research", rows=rows,
+            queue=pipeline.queue_status(),
+            unresearched=sum(1 for p in people if p.can_research),
+            batch_sizes=BATCH_SIZES, gap=pipeline.QUEUE_GAP_SECONDS)
     )
 
 
+# How many a batch may take at once. Capped rather than open-ended: each
+# contact spends API credits, and a runaway batch is not something a stray
+# click should be able to start.
+BATCH_SIZES = (10, 25, 50, 100)
+
+
+@app.post("/research/batch/linkedin")
+def research_batch_linkedin(limit: int = Form(25), back: str = Form(""),
+                            db: Session = Depends(get_session)):
+    """Re-pull LinkedIn activity for contacts already researched.
+
+    Separate from the research batch because it answers a different question:
+    not "who have we never looked at" but "whose panel was built by the old
+    search". Oldest newest-post first — the contact whose most recent row is
+    the most stale has the most to gain.
+    """
+    target = _safe_back(back, "/research")
+    if limit not in BATCH_SIZES:
+        limit = BATCH_SIZES[1]
+
+    def newest(p):
+        dates = [a.activity_date for a in p.activities if a.activity_date]
+        return max(dates) if dates else date.min
+
+    waiting = [p for p in people_q(db).all()
+               if p.linkedin_url and not p.linkedin_refreshing]
+    waiting.sort(key=newest)
+    slugs = [p.slug for p in waiting[:limit]]
+    if not slugs:
+        return RedirectResponse(_with_err(target, "nobatch"), status_code=303)
+    if not pipeline.queue_research(slugs, kind="linkedin"):
+        return RedirectResponse(_with_err(target, "batchrunning"),
+                                status_code=303)
+    return RedirectResponse(target, status_code=303)
+
+
+@app.post("/research/batch")
+def research_batch(limit: int = Form(25), back: str = Form(""),
+                   db: Session = Depends(get_session)):
+    """Queue the next `limit` unresearched contacts, one after another.
+
+    Serial and paced — see pipeline.QUEUE_GAP_SECONDS. The existing
+    "Researching…" badge and the auto-refresh report progress, so there is
+    nothing to poll and nothing new to render.
+    """
+    target = _safe_back(back, "/research")
+    if limit not in BATCH_SIZES:
+        limit = BATCH_SIZES[1]
+
+    # Least-covered first: a contact with nothing on file has the most to gain
+    # from a run, and the reader watching the table sees the empty rows fill.
+    waiting = [p for p in people_q(db).all() if p.can_research]
+    waiting.sort(key=lambda p: len(p.activities) + len(p.interests))
+    slugs = [p.slug for p in waiting[:limit]]
+    if not slugs:
+        return RedirectResponse(_with_err(target, "nobatch"), status_code=303)
+
+    if not pipeline.queue_research(slugs):
+        return RedirectResponse(_with_err(target, "batchrunning"),
+                                status_code=303)
+    return RedirectResponse(target, status_code=303)
+
+
+@app.post("/research/batch/stop")
+def research_batch_stop(back: str = Form("")):
+    """Stop after the contact currently being researched."""
+    pipeline.stop_queue()
+    return RedirectResponse(_safe_back(back, "/research"), status_code=303)
+
+
 @app.get("/reports", response_class=HTMLResponse)
-def reports(request: Request, db: Session = Depends(get_session)):
+def reports(request: Request, ok: str = "",
+            db: Session = Depends(get_session)):
     people = people_q(db).all()
     by_seniority, by_industry, by_country = {}, {}, {}
     for p in people:
@@ -436,9 +560,38 @@ def reports(request: Request, db: Session = Depends(get_session)):
         ctry = (p.company.country if p.company else None) or "Unknown"
         by_country[ctry] = by_country.get(ctry, 0) + 1
     drift = [p for p in people if p.title_drift]
+
+    # One row per upload, newest first, each with what is left of it. The
+    # counts stored on the row are what the file DID; `still_here` is what
+    # survives, and the two differ as soon as anyone deletes a contact.
+    uploads = []
+    for record in db.query(Import).order_by(Import.uploaded_at.desc()).all():
+        rows = record.people
+        uploads.append({
+            "record": record,
+            "people": len(rows),
+            "companies": len({p.company_id for p in rows if p.company_id}),
+            "researched": sum(1 for p in rows
+                              if p.research_status == RESEARCH_DONE),
+            "with_email": sum(1 for p in rows if p.email),
+            "with_linkedin": sum(1 for p in rows if p.linkedin_url),
+            "in_outreach": sum(1 for p in rows if p.outreach_steps),
+            "top_industries": sorted(
+                _tally(p.company.industry if p.company else None
+                       for p in rows).items(), key=lambda x: -x[1])[:4],
+            "top_countries": sorted(
+                _tally((p.company.country if p.company else None) or p.country
+                       for p in rows).items(), key=lambda x: -x[1])[:4],
+        })
+
+    # Anyone imported before uploads were recorded. Reported as its own group
+    # rather than left out, or the numbers on this page would not add up.
+    older = [p for p in people if not p.import_id]
+
     return templates.TemplateResponse(
         request, "reports.html",
-        ctx(request, db, nav="reports",
+        ctx(request, db, nav="reports", uploads=uploads, ok=ok,
+            older_count=len(older),
             by_seniority=sorted(by_seniority.items(), key=lambda x: -x[1]),
             by_industry=sorted(by_industry.items(), key=lambda x: -x[1]),
             by_country=sorted(by_country.items(), key=lambda x: -x[1]),
@@ -472,6 +625,8 @@ def settings(request: Request, err: str = "", ok: str = "",
         request, "settings.html",
         ctx(request, db, nav="settings",
             firecrawl=bool(os.environ.get("FIRECRAWL_API_KEY")),
+            apify_on=apify.configured(),
+            apify_actor=apify.ACTOR.replace("~", "/"),
             providers=providers,
             active_provider=llm.provider(),
             active_label=llm.label(),
@@ -486,6 +641,7 @@ def settings(request: Request, err: str = "", ok: str = "",
 async def save_settings(request: Request,
                         llm_provider: str = Form(""),
                         firecrawl_api_key: str = Form(""),
+                        apify_api_key: str = Form(""),
                         clear: str = Form(""),
                         verify: str = Form("")):
     """Store the provider choice and any keys entered, and use them at once.
@@ -516,6 +672,8 @@ async def save_settings(request: Request,
         pending["LLM_PROVIDER"] = llm_provider
     if firecrawl_api_key.strip():
         pending["FIRECRAWL_API_KEY"] = firecrawl_api_key.strip()
+    if apify_api_key.strip():
+        pending[apify.KEY_VAR] = apify_api_key.strip()
 
     if not pending:
         return RedirectResponse("/settings?ok=nothing", status_code=303)
@@ -532,6 +690,59 @@ async def save_settings(request: Request,
         return RedirectResponse("/settings?ok=verified", status_code=303)
 
     return RedirectResponse("/settings?ok=saved", status_code=303)
+
+
+def _tally(values):
+    """{value: count}, skipping the empties. Small enough to keep here."""
+    out = {}
+    for value in values:
+        key = (value or "").strip()
+        if key:
+            out[key] = out.get(key, 0) + 1
+    return out
+
+
+@app.post("/imports/{import_id}/delete")
+def delete_import(import_id: int, db: Session = Depends(get_session)):
+    """Remove an upload AND the contacts it brought in.
+
+    Only the contacts this file CREATED. An import that merely matched and
+    filled in someone who was already here did not bring them, and deleting
+    them would take out a contact another file is responsible for — so those
+    are left alone and the page says so.
+
+    Everything hanging off a deleted contact — their posts, drafts, outreach
+    steps, feedback — goes with them through the existing cascades. This
+    cannot be undone, which is why the button sits behind a disclosure that
+    names the number.
+    """
+    record = db.query(Import).filter(Import.id == import_id).first()
+    if not record:
+        return RedirectResponse("/reports", status_code=303)
+    for person in list(record.people):
+        db.delete(person)
+    db.delete(record)
+    db.commit()
+    return RedirectResponse("/reports?ok=deleted", status_code=303)
+
+
+@app.post("/imports/{import_id}/forget")
+def forget_import(import_id: int, db: Session = Depends(get_session)):
+    """Drop the upload from the list and keep every contact.
+
+    For a file you no longer want listed but whose contacts you are working
+    on. The contacts stay; they simply stop saying which file they came in
+    on, which is the state everyone imported before this existed is already
+    in.
+    """
+    record = db.query(Import).filter(Import.id == import_id).first()
+    if not record:
+        return RedirectResponse("/reports", status_code=303)
+    for person in list(record.people):
+        person.import_id = None
+    db.delete(record)
+    db.commit()
+    return RedirectResponse("/reports?ok=forgot", status_code=303)
 
 
 @app.get("/upload", response_class=HTMLResponse)
@@ -604,8 +815,10 @@ def research_person_now(slug: str, back: str = Form(""),
 
     if not person.can_research:
         # Already running, or already has results. Re-running spends credits,
-        # so it isn't something a stray double-click should do.
-        return RedirectResponse(f"/person/{slug}?err=nores", status_code=303)
+        # so it isn't something a stray double-click should do — and it should
+        # not move the reader off the page they pressed it on either.
+        return RedirectResponse(
+            _with_err(target or f"/person/{slug}", "nores"), status_code=303)
 
     pipeline.mark_running(db, person)
     pipeline.research_in_background(slug)
@@ -639,7 +852,8 @@ def refresh_linkedin_now(slug: str, back: str = Form(""),
 @app.get("/outreach", response_class=HTMLResponse)
 def outreach_board(request: Request, db: Session = Depends(get_session),
                    view: str = "today", err: str = "", country: str = "",
-                   category: str = "", tone: str = "", length: str = ""):
+                   category: str = "", tone: str = "", length: str = "",
+                   wt: str = "", wl: str = ""):
     """The sequence board, one sheet at a time.
 
     Split by outreach_stage rather than by research status — the question this
@@ -689,7 +903,7 @@ def outreach_board(request: Request, db: Session = Depends(get_session),
     return templates.TemplateResponse(
         request, "outreach.html",
         ctx(request, db, nav="outreach", view=view,
-            mail_prefs={"tone": tone, "length": length},
+            mail_prefs={"tone": tone, "length": length, "wt": wt, "wl": wl},
             outreach_error=OUTREACH_ERRORS.get(err), new_people=new,
             rejected=rejected,
             active=active, done=done, sequence=outreach.SEQUENCE,
@@ -862,6 +1076,8 @@ def outreach_drafts_clear(step_id: int, back: str = Form(""),
 
 @app.post("/outreach/{step_id}/skill-email")
 def outreach_skill_email(step_id: int, back: str = Form(""),
+                         tone: str = Form(""),
+                         length: str = Form(""),
                          db: Session = Depends(get_session)):
     """Write this contact's email under the brief in skills/.
 
@@ -875,21 +1091,27 @@ def outreach_skill_email(step_id: int, back: str = Form(""),
         return RedirectResponse("/outreach", status_code=303)
     target = _safe_back(back, f"/person/{step.person.slug}#outreach")
 
+    # A refusal comes back to the same panel with the dials still set to what
+    # was asked for. Dropping them reset the selects to the previous draft's
+    # settings, which reads as the choice having been ignored.
+    kept = _with_params(target, wt=tone, wl=length)
+
     try:
-        result = messages.skill_email(step.person, db=db)
+        result = messages.skill_email(step.person, db=db, tone=tone,
+                                      length=length)
     except messages.LLMNotConfigured:
-        return RedirectResponse(_with_err(target, "nollm"), status_code=303)
+        return RedirectResponse(_with_err(kept, "nollm"), status_code=303)
     except skills.SkillMissing:
-        return RedirectResponse(_with_err(target, "noskill"), status_code=303)
+        return RedirectResponse(_with_err(kept, "noskill"), status_code=303)
     except Exception as exc:                        # never a 500 on this path
         step.person.draft_note = f"Drafting failed: {exc}"[:300]
         db.commit()
-        return RedirectResponse(_with_err(target, "draft"), status_code=303)
+        return RedirectResponse(_with_err(kept, "draft"), status_code=303)
 
     if "reason" in result:
         step.person.draft_note = result["reason"][:300]
         db.commit()
-        return RedirectResponse(_with_err(target, "draft"), status_code=303)
+        return RedirectResponse(_with_err(kept, "draft"), status_code=303)
 
     messages.store_options(db, step.person, "email", step.step_key, [{
         "angle": result["signal"],
@@ -897,9 +1119,54 @@ def outreach_skill_email(step_id: int, back: str = Form(""),
         "body": result["body"],
         "basis": f"{result['opportunity']} | confidence "
                  f"{result['confidence']}: {result['why']}",
+        "tone": result.get("tone"),
+        "length": result.get("length"),
         "model": result["model"],
     }])
     step.person.draft_note = None
+    db.commit()
+    return RedirectResponse(target, status_code=303)
+
+
+@app.post("/activity/{activity_id}/draft-comment")
+def draft_one_comment(activity_id: int, back: str = Form(""),
+                      db: Session = Depends(get_session)):
+    """Draft — or redraft — the comment for one post.
+
+    One model call for one post. The all-at-once button remains for filling an
+    empty panel; this is for the post you actually want to comment on, and for
+    trying again when the first draft was not usable.
+    """
+    activity = db.query(LinkedInActivity).filter(
+        LinkedInActivity.id == activity_id).first()
+    if not activity or not activity.person:
+        return RedirectResponse("/people", status_code=303)
+    person = activity.person
+    target = _safe_back(back, f"/person/{person.slug}#linkedin")
+
+    try:
+        messages.draft_one(db, person, activity)
+    except messages.LLMNotConfigured:
+        return RedirectResponse(_with_err(target, "nollm"), status_code=303)
+    except Exception as exc:                       # never a 500 on this path
+        activity.suggested_note = f"drafting failed: {exc}"[:300]
+        db.commit()
+    return RedirectResponse(target, status_code=303)
+
+
+@app.post("/activity/{activity_id}/clear-comment")
+def clear_one_comment(activity_id: int, back: str = Form(""),
+                      db: Session = Depends(get_session)):
+    """Throw this post's draft away, so the panel offers to write a new one."""
+    activity = db.query(LinkedInActivity).filter(
+        LinkedInActivity.id == activity_id).first()
+    if not activity or not activity.person:
+        return RedirectResponse("/people", status_code=303)
+    target = _safe_back(back, f"/person/{activity.person.slug}#linkedin")
+    activity.suggested_comment = None
+    activity.suggested_note = None
+    activity.suggested_at = None
+    activity.suggested_model = None
     db.commit()
     return RedirectResponse(target, status_code=303)
 

@@ -27,7 +27,7 @@ Apply these to every email and comment. This is what separates "on-brand outboun
 - Any comment that doesn't specifically require having read *this* post (a generic comment is a failed comment, even if well-written)
 - Emojis, unless the lead's own post uses them heavily and it would look stranger not to match tone
 
-## Email structure (80–120 words — count words before finalizing)
+## Email structure (use the word count you are given — count before finalizing)
 
 1. Opening line — states the real research signal plainly. No throat-clearing.
 2. One line connecting that signal to a genuine Screwdriver capability or relevant proof point.
@@ -35,7 +35,20 @@ Apply these to every email and comment. This is what separates "on-brand outboun
 4. One low-pressure CTA — a question, an offer to share one relevant example, or "worth a short chat if useful." Never multiple asks.
 5. Simple sign-off. No "Best regards, [Name] | Founder | Screwdriver Films | [phone] | [website]" giant block — one line is enough for a cold email.
 
-## Comment structure (1–2 sentences)
+## Comment structure (2–3 short lines, unsigned, under 250 characters)
+
+A comment is two or three short lines, not a short email. No greeting, no
+paragraph breaks, and **never sign it** — no name, no “- Rahul”, no role, no
+company. LinkedIn already shows who is commenting, so a signature reads as an
+advert. Never name Screwdriver or what it sells.
+
+**250 characters is a hard ceiling** — LinkedIn collapses anything longer
+behind “…see more”, so the second half of a long comment is read by nobody.
+Count the characters, not just the words.
+
+Write it the way a person types into a comment box: plain words, short
+sentences, an ordinary observation. If it reads like the opening of a blog
+post — “The real story here is…”, “Most teams still…” — it is wrong.
 
 1. Reference the specific idea/number/announcement from the post.
 2. Add one independent thought — a related observation, a respectful pushback, a question, or a connected data point. This is what makes it read as a real person, not an engagement bot.

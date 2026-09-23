@@ -643,13 +643,21 @@ over-length draft is not a stylistic problem but an unpasteable one. Comments ar
 also collapsed behind "…see more" at roughly 250 characters, which is why the
 length bands sit far under the hard limit rather than near it.
 
-> **Dormant, on purpose.** `messages.suggest_comment_options`,
-> `messages.suggest_email_options` and the whole of `app/personalisation.py` — a
-> richer path producing **three graded options** per step behind an evidence
-> gate, with a much wider validator set (`BANNED_COMMONALITY`, `GENERIC_FILLER`)
-> — are complete and tested but currently reachable from no button, along with
-> the `outreach_draft_block` macro that drove them. They are left intact pending
-> a decision on which drafting model to keep. Nothing in the live app calls them.
+> **Live on the LinkedIn steps.** `messages.suggest_comment_options`,
+> `app/personalisation.py` and the `outreach_draft_block` macro — a path
+> producing **three graded options** behind an evidence gate, with a wider
+> validator set (`BANNED_COMMONALITY`, `GENERIC_FILLER`) — drive the first
+> three steps of the sequence. Those steps are LinkedIn work, so the comment
+> is the deliverable there and the written-email panel is not shown: an empty
+> email box on a comment step reads as a fault rather than as a step that is
+> not yet due. `connect` has no body to write, so `OutreachStep.wants_draft`
+> excludes it and no draft panel appears.
+>
+> **Still dormant:** `messages.suggest_email_options`, the email half of the
+> same path. The email step uses the skill-written email instead — one draft
+> written from `skills/`, not three graded options — so nothing reaches it.
+> It is left intact pending a decision on whether the email step should offer
+> options too.
 
 ---
 
@@ -799,7 +807,7 @@ What the app writes is decided by **Markdown, not Python**. Three files in
 | File | What it holds |
 |---|---|
 | `SKILL.md` | the process and the guardrails — find the signal, refuse rather than invent |
-| `voice-and-format.md` | tone, banned phrases, the 80–120 word band, subject rules |
+| `voice-and-format.md` | tone, banned phrases, subject rules |
 | `screwdriver-knowledge.md` | capabilities and portfolio, for finding a real match |
 
 `app/skills.py` loads them, strips the front matter, and assembles two prompts:
@@ -917,9 +925,11 @@ BD_Engine/
 └── requirements.txt       seven direct dependencies
 ```
 
-The ten tables: `people`, `companies`, `linkedin_activities`,
+The eleven tables: `people`, `companies`, `linkedin_activities`,
 `web_findings`, `company_findings`, `interests`, `outreach_steps` and
-`outreach_drafts`, `profile_entries` and `draft_feedback`.
+`outreach_drafts`, `profile_entries`, `draft_feedback` and `imports` — one row
+per uploaded CSV, so the Reports page can say where a contact came from and an
+upload can be undone.
 
 **Where to start reading.** `app/models.py` for the shape of the data,
 `app/pipeline.py` for what research actually does, and `templates/_partials.html`

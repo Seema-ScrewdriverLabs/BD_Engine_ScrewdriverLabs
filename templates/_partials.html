@@ -142,7 +142,7 @@
 {% endmacro %}
 
 
-{% macro people_table(people, selected_slug=None, link_full=False, show_segments=False) %}
+{% macro people_table(people, selected_slug=None, link_full=False, show_segments=False, back='/people') %}
 <div class="overflow-x-auto">
 <table class="w-full text-left" style="min-width:520px">
   <thead>
@@ -159,7 +159,7 @@
   </thead>
   <tbody>
   {% for p in people %}
-    <tr class="border-t border-[#EFEFF2] hover:bg-[#FAFAFB] {% if p.slug == selected_slug %}bg-brand-50/60{% endif %}">
+    <tr id="p-{{ p.slug }}" class="border-t border-[#EFEFF2] hover:bg-[#FAFAFB] {% if p.slug == selected_slug %}bg-brand-50/60{% endif %}">
       <td class="px-4 py-3">
         <a href="{% if link_full %}/person/{{ p.slug }}{% else %}/?selected={{ p.slug }}{% endif %}" class="flex items-center gap-2.5 group">
           {{ avatar(p, 'w-8 h-8 text-[11px]') }}
@@ -191,7 +191,7 @@
         <span class="inline-flex flex-wrap items-center gap-1.5">
           {{ status_badge(p.enrichment_status, p.status_label) }}
           {{ research_badge(p.research_status, p.research_label) }}
-          {{ research_button(p, back='/people') }}
+          {{ research_button(p, back=back ~ '#p-' ~ p.slug) }}
         </span>
       </td>
     </tr>
@@ -379,7 +379,10 @@
       <svg class="w-[19px] h-[19px] text-[#0A66C2] mt-0.5 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3A2 2 0 0 1 21 5v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14M8.6 18.3v-7H6.3v7h2.3M7.4 10a1.3 1.3 0 1 0 0-2.7 1.3 1.3 0 0 0 0 2.7m10.9 8.3v-4c0-2.1-1.1-3.1-2.6-3.1a2.3 2.3 0 0 0-2 1.1v-1H11.4c0 .7 0 7 0 7h2.3v-3.9c0-.2 0-.4.1-.6.2-.4.5-.9 1.2-.9.9 0 1.2.7 1.2 1.7v3.7h2.2Z"/></svg>
       <div>
         <h3 class="text-[15px] font-bold leading-tight">Top 5 LinkedIn Activity</h3>
-        <p class="text-[11.5px] text-ink-faint mt-0.5">Posts · Reposts · Comments · Tagged — found by search or added by hand, never scraped
+        <p class="text-[11.5px] text-ink-faint mt-0.5">Posts · Reposts · Comments · Tagged
+          {%- if person.linkedin_posts_source == 'apify' %} — read from their own profile via Apify
+          {%- elif person.linkedin_posts_source == 'firecrawl' %} — matched by web search
+          {%- else %} — found by search or added by hand{% endif %}
           {%- if person.linkedin_refreshed_at %} · last refreshed {{ person.linkedin_refreshed_at|relative_time }}{% endif %}</p>
       </div>
     </div>
@@ -400,7 +403,10 @@
          how it looked in use. Reloads until the flag clears; rendered only
          while a refresh is actually in flight, so it can't loop forever. With
          JS off it degrades to what it did before: reload the page yourself. #}
-      <script>setTimeout(function () { location.reload(); }, 4000);</script>
+      <script>setTimeout(function () {
+        if (window.__piHoldScroll) window.__piHoldScroll();
+        location.reload();
+      }, 4000);</script>
       {% elif person.can_refresh_linkedin %}
       <form method="post" action="/person/{{ person.slug }}/refresh-linkedin" class="inline-flex">
         <input type="hidden" name="back" value="{{ '/person/' + person.slug + '#linkedin' if allow_add else '/?selected=' + person.slug + '#linkedin' }}">
@@ -427,7 +433,7 @@
   {% if person.activities %}
   <ol class="space-y-2.5">
     {% for a in person.activities %}
-    <li class="flex gap-3 group">
+    <li id="act-{{ a.id }}" class="flex gap-3 group">
       <span class="text-[12px] font-semibold text-ink-faint w-3.5 shrink-0 pt-1.5">{{ loop.index }}</span>
       <span class="grid place-items-center w-7 h-7 rounded-lg shrink-0 mt-0.5
         {% if a.activity_type == 'post' %}bg-sky-50 text-sky-600
@@ -451,7 +457,12 @@
             <span class="text-[10px] font-medium text-ink-faint bg-[#F4F4F6] border border-[#EAEBEF] rounded px-1.5 py-0.5">pasted</span>
             {% endif %}
           </span>
-          <span class="text-[11px] text-ink-faint shrink-0">{{ a.activity_date|relative_time or 'date unknown' }}</span>
+          <span class="text-[11px] text-ink-faint shrink-0 text-right">
+            {%- if a.activity_date %}
+            <span title="posted {{ a.activity_date.isoformat() }}">{{ a.activity_date|relative_time }}</span>
+            <span class="block text-[10px] text-ink-faint/80">{{ a.activity_date|short_date }}</span>
+            {%- else %}date unknown{% endif %}
+          </span>
         </div>
         {% if a.text %}
         <p class="text-[13px] leading-relaxed mt-0.5">{{ a.text }}</p>
@@ -496,6 +507,42 @@
           <p class="text-[11.5px] text-ink-faint"><b class="text-ink-soft">No comment drafted.</b> {{ a.suggested_note }}</p>
         </div>
         {% endif %}
+        {# One post, one button. Drafting used to be all-or-nothing: getting a
+           comment for yesterday's post spent a call on the four older ones
+           too, and redoing one redid all five. `back` carries the anchor so
+           the page returns to this post rather than the top. #}
+        {% set li_back = '/person/' ~ person.slug ~ '#act-' ~ a.id %}
+        <div class="flex items-center gap-2 flex-wrap mt-2">
+          {% if a.suggested_comment %}
+          <form method="post" action="/activity/{{ a.id }}/draft-comment">
+            <input type="hidden" name="back" value="{{ li_back }}">
+            <button class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border border-violet2-200 bg-white hover:bg-violet2-50 text-violet2-700 text-[11.5px] font-medium"
+                    title="Write a new comment for this post, replacing the one above. One model call.">
+              <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>
+              Redraft this one
+            </button>
+          </form>
+          <form method="post" action="/activity/{{ a.id }}/clear-comment">
+            <input type="hidden" name="back" value="{{ li_back }}">
+            <button class="text-[11px] text-ink-faint hover:text-rose-600">Discard it</button>
+          </form>
+          {% elif a.text %}
+          <form method="post" action="/activity/{{ a.id }}/draft-comment">
+            <input type="hidden" name="back" value="{{ li_back }}">
+            <button class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg bg-violet2-600 hover:bg-violet2-700 text-white text-[11.5px] font-medium"
+                    title="Draft a comment for this post only. One {{ llm_label() }} request.">
+              <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              {% if a.suggested_note %}Try again{% else %}Draft a comment{% endif %}
+            </button>
+          </form>
+          <span class="text-[10.5px] text-ink-faint">one {{ llm_label() }} request · this post only</span>
+          {% else %}
+          {# No text means nothing to reply to, so the button would spend a
+             call to be told so. The paste form below is the actual fix. #}
+          <span class="text-[10.5px] text-ink-faint">No post text, so there is nothing to draft from — paste it below.</span>
+          {% endif %}
+        </div>
+
         <div class="flex items-center gap-3 flex-wrap">
           {# Not when a drafted comment is shown: its block already links this
              same post, right beside the text being pasted into it. #}
@@ -521,14 +568,39 @@
   {% else %}
   <div class="rounded-xl border border-dashed border-[#DEDFE4] bg-[#FAFAFB] px-4 py-6 text-center">
     <svg class="w-7 h-7 mx-auto text-ink-faint/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>
+    {# Three different empties, and only one of them is a to-do. Rendering
+       them identically is why "no posts" read as "broken" for so long. #}
+    {% if person.linkedin_checked and person.linkedin_posts_source == 'apify' %}
+    <p class="text-[13px] font-medium mt-2">No posts on this LinkedIn profile</p>
+    <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">
+      Apify read the profile itself on {{ person.linkedin_posts_checked_at|short_date }} and it has no posts to return —
+      this contact may not post, or the profile may be private. That is an answer, not a failed run.
+      Paste a post below if you can see one they have written.
+    </p>
+    {% elif person.linkedin_checked %}
+    <p class="text-[13px] font-medium mt-2">Nothing matched by web search</p>
+    <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">
+      Checked {{ person.linkedin_posts_checked_at|short_date }}. Only posts whose author is demonstrably this
+      contact are kept — ones that merely share their name belong to someone else. Web search cannot read
+      LinkedIn, so it misses most posts: add an Apify token on
+      <a href="/settings" class="text-violet2-600 hover:underline">Settings</a> to read the profile directly.
+    </p>
+    {% else %}
     <p class="text-[13px] font-medium mt-2">No LinkedIn activity on file</p>
-    <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">No post could be matched to this person's LinkedIn profile. Search only keeps posts whose author is demonstrably them — posts that merely share their name are discarded, because most of them belong to someone else. Paste up to five posts, reposts, comments or tagged mentions below to fill the gap.</p>
+    <p class="text-[12.5px] text-ink-faint mt-1 max-w-sm mx-auto">Nobody has looked yet. Run research on this contact, or paste up to five posts, reposts, comments or tagged mentions below.</p>
+    {% endif %}
   </div>
   {% endif %}
 
   {# Search only writes posts whose author slug matches this contact, so an
      unverified row can only come from a database saved before that rule. The
      badge branch above still labels one if it turns up. #}
+  {% if person.linkedin_posts_note %}
+  <div class="mt-3 rounded-xl bg-amber-50 border border-amber-100 px-3.5 py-2.5">
+    <p class="text-[12px] text-amber-800 leading-relaxed">{{ person.linkedin_posts_note }}</p>
+  </div>
+  {% endif %}
+
   {% set unverified = person.activities|rejectattr('trusted')|list|length %}
   {% if unverified %}
   <div class="mt-3 rounded-xl bg-amber-50 border border-amber-100 px-3.5 py-2.5">
@@ -1143,37 +1215,45 @@
   {% else %}
   {# ------------------------------------------------- state 2 & 3: draftable #}
 
-  {% if step.person.draft_note and not options %}
-  <p class="text-[12px] text-ink-soft bg-white border border-[#EAEBEF] rounded-lg px-2.5 py-1.5 mb-2">{{ step.person.draft_note }}</p>
+  {% if step.person.draft_note %}
+  <p class="text-[12px] text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 mb-2">
+    {% if options %}<b class="font-semibold">Nothing new was written, so the options below are the earlier ones.</b> {% endif %}{{ step.person.draft_note }}
+    {% if 'fragment' in step.person.draft_note or 'no specific content' in step.person.draft_note or 'headline' in step.person.draft_note %}
+    <br><span class="text-[11px]">The stored text for this post is a fragment rather than the post itself. Paste the full post on
+      <a href="/person/{{ step.person.slug }}#linkedin" class="font-medium text-violet2-600 hover:underline">their LinkedIn panel</a>
+      and a comment becomes possible.</span>
+    {% endif %}
+  </p>
   {% endif %}
 
   {% for d in options %}
-  <div class="rounded-lg bg-white border border-violet2-100 p-2.5 {{ 'mt-2' if not loop.first }}">
+  {# data-copy-block, not data-copy="<id>": the handler that is actually on the
+     page lives in base.html and copies a block by joining its parts. #}
+  <div class="rounded-lg bg-white border border-violet2-100 p-2.5 {{ 'mt-2' if not loop.first }}" data-copy-block>
     <div class="flex items-center gap-1.5 flex-wrap mb-1.5">
       <span class="grid place-items-center w-4 h-4 rounded bg-violet2-100 text-violet2-700 text-[9px] font-bold shrink-0">{{ d.variant }}</span>
       <span class="text-[11px] font-medium text-violet2-700">{{ d.angle }}</span>
-      {% if d.tone %}<span class="text-[10px] text-ink-faint">· {{ EMAIL_TONES.get(d.tone, {}).get('label', d.tone) }}</span>{% endif %}
+      {% if d.tone %}<span class="text-[10px] text-ink-faint">· {{ (EMAIL_TONES if is_email else COMMENT_TONES).get(d.tone, {}).get('label', d.tone) }}</span>{% endif %}
+      {{ copy_button() }}
     </div>
 
     {% if d.subject %}
     <div class="flex items-baseline gap-1.5 mb-1.5 pb-1.5 border-b border-[#F2F2F5]">
       <span class="text-[10px] uppercase tracking-wide text-ink-faint shrink-0">Subject</span>
-      <input id="draft-{{ d.id }}-subject" value="{{ d.subject }}"
+      <input data-copy-part data-copy-prefix="Subject: " value="{{ d.subject }}"
              class="flex-1 min-w-0 text-[12.5px] font-medium bg-transparent outline-none">
-      {{ copy_field_button('draft-' ~ d.id ~ '-subject', 'Copy') }}
     </div>
     {% endif %}
 
-    <textarea id="draft-{{ d.id }}-body" rows="{{ 7 if is_email else 3 }}"
+    <textarea data-copy-part rows="{{ 7 if is_email else 3 }}"
               class="w-full resize-y rounded-lg bg-[#FBFBFC] border border-[#EFEFF2] px-2.5 py-1.5 text-[12.5px] leading-relaxed outline-none focus:bg-white focus:border-violet2-200">{{ d.body }}</textarea>
 
     {# Length reported rather than promised, and against the limit that
        actually matters: LinkedIn refuses a comment over its cap, and collapses
        one past the visible run behind "…see more". #}
+    {# The button above copies what is in the box, not what the model
+       returned, so an edit made here is what lands on the clipboard. #}
     <div class="flex items-center gap-2 flex-wrap mt-1.5">
-      {# Copies what is in the box, not what the model returned, so an edit
-         made here is what lands on the clipboard. #}
-      {{ copy_field_button('draft-' ~ d.id ~ '-body', 'Copy ' ~ ('email' if is_email else 'comment')) }}
       <span class="text-[10px] text-ink-faint">{{ d.word_count }} words · {{ d.char_count }} chars</span>
       {% if not is_email %}
         {% if d.over_linkedin_limit %}
@@ -1181,7 +1261,9 @@
         {% elif d.char_count <= LINKEDIN_COMMENT_VISIBLE_CHARS %}
         <span class="text-[10px] text-emerald-700">shows in full without “see more”</span>
         {% else %}
-        <span class="text-[10px] text-amber-700">collapses after ~{{ LINKEDIN_COMMENT_VISIBLE_CHARS }} chars</span>
+        {# Drafts are rejected over this now, so reaching here means an older
+           row or a hand edit - still worth flagging rather than hiding. #}
+        <span class="text-[10px] text-amber-700">over {{ LINKEDIN_COMMENT_VISIBLE_CHARS }} chars — LinkedIn will collapse it</span>
         {% endif %}
       {% endif %}
     </div>
@@ -1199,16 +1281,19 @@
         class="flex items-end gap-2 flex-wrap {{ 'mt-2.5 pt-2.5 border-t border-violet2-100' if options else '' }}">
     <input type="hidden" name="back" value="{{ back }}">
 
-    {% if is_email %}
+    {# Both kinds take a tone, from their own vocabulary. The email tones say
+       how it should sound; at 15-55 words a comment has no room for that, so
+       its tones say what the comment should DO instead. #}
+    {% set tones = EMAIL_TONES if is_email else COMMENT_TONES %}
+    {% set tone_fallback = DEFAULT_EMAIL_TONE if is_email else DEFAULT_COMMENT_TONE %}
     <label class="block">
       <span class="block text-[10px] uppercase tracking-wide text-ink-faint mb-0.5">Tone</span>
       <select name="tone" class="h-8 px-2 rounded-lg bg-white border border-[#E2E3E8] text-[12px] outline-none focus:border-violet2-300">
-        {% for key, spec in EMAIL_TONES.items() %}
-        <option value="{{ key }}" {{ 'selected' if (last.tone if last else DEFAULT_EMAIL_TONE) == key }}>{{ spec.label }} — {{ spec.note }}</option>
+        {% for key, spec in tones.items() %}
+        <option value="{{ key }}" {{ 'selected' if (last.tone if last and last.tone else tone_fallback) == key }}>{{ spec.label }} — {{ spec.note }}</option>
         {% endfor %}
       </select>
     </label>
-    {% endif %}
 
     <label class="block">
       <span class="block text-[10px] uppercase tracking-wide text-ink-faint mb-0.5">Length</span>
@@ -1301,9 +1386,16 @@
   <div class="flex items-center gap-2 flex-wrap mb-2">
     <span class="text-[10px] font-semibold uppercase tracking-wide text-violet2-600">Written for {{ step.person.first_name or step.person.full_name }}</span>
     {% if written %}
-    <span class="text-[10px] text-ink-faint">{{ written.body.split()|length }} words · {{ llm_label() }}{% if written.model %} · {{ written.model }}{% endif %}</span>
+    <span class="text-[10px] text-ink-faint">{{ written.body.split()|length }} words{% if written.tone %} · {{ SKILL_TONES_UI[written.tone].label if written.tone in SKILL_TONES_UI else written.tone }}{% endif %}{% if written.length %} · {{ SKILL_LENGTHS[written.length].label if written.length in SKILL_LENGTHS else written.length }}{% endif %} · {{ llm_label() }}{% if written.model %} · {{ written.model }}{% endif %}</span>
     {% endif %}
   </div>
+
+  {% if step.person.draft_note %}
+  <p class="text-[12px] text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 mb-2">
+    {% if written %}<b class="font-semibold">That rewrite was refused, so the draft below is the earlier one.</b> {% endif %}{{ step.person.draft_note }}
+    {% if not step.person.research_completed_at %}<br><span class="text-[11px]">This contact has not been researched yet — run research on them and the draft will have something to work from.</span>{% endif %}
+  </p>
+  {% endif %}
 
   {% if written %}
   <div class="rounded-lg bg-white border border-violet2-100 p-2.5" data-copy-block>
@@ -1326,18 +1418,38 @@
     {{ draft_feedback_bar('email', step.id, step.person.feedback_for('email', step_key=step.step_key),
                           back, written.subject or '', written.body or '') }}
   </div>
-  {% elif step.person.draft_note %}
-  <p class="text-[12px] text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 mb-2">{{ step.person.draft_note }}</p>
-  {% else %}
+  {% elif not step.person.draft_note %}
   <p class="text-[12px] text-ink-faint mb-2">Nothing written yet. The brief in <span class="font-mono text-[11px]">skills/</span> and this contact's research decide what it says — and it refuses rather than inventing a hook.</p>
   {% endif %}
 
-  <form method="post" action="/outreach/{{ step.id }}/skill-email" class="mt-2 flex items-center gap-2 flex-wrap">
+  {# Tone sits inside this form, not in the GET form below it. That one
+     recomposes the fixed template on read and costs nothing; this one spends a
+     request and rewrites the whole email, so the tone has to be chosen before
+     the button is pressed rather than applied afterwards. #}
+  <form method="post" action="/outreach/{{ step.id }}/skill-email" class="mt-2 flex items-end gap-2 flex-wrap">
     <input type="hidden" name="back" value="{{ back }}">
+    <label class="block">
+      <span class="block text-[10px] uppercase tracking-wide text-ink-faint mb-0.5">Tone to write in</span>
+      <select name="tone" class="h-8 px-2 rounded-lg bg-white border border-[#E2E3E8] text-[12px] outline-none focus:border-violet2-300">
+        {% set shown_tone = prefs.get('wt') if prefs.get('wt') in SKILL_TONES_UI else (written.tone if written and written.tone else DEFAULT_SKILL_TONE) %}
+        {% for key, spec in SKILL_TONES_UI.items() %}
+        <option value="{{ key }}" {% if key == shown_tone %}selected{% endif %}>{{ spec.label }} — {{ spec.note }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="block">
+      <span class="block text-[10px] uppercase tracking-wide text-ink-faint mb-0.5">Length to write</span>
+      <select name="length" class="h-8 px-2 rounded-lg bg-white border border-[#E2E3E8] text-[12px] outline-none focus:border-violet2-300">
+        {% set shown_length = prefs.get('wl') if prefs.get('wl') in SKILL_LENGTHS else (written.length if written and written.length else DEFAULT_SKILL_LENGTH) %}
+        {% for key, spec in SKILL_LENGTHS.items() %}
+        <option value="{{ key }}" {% if key == shown_length %}selected{% endif %}>{{ spec.label }} — {{ spec.note }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <button class="h-8 px-3 rounded-lg bg-violet2-600 hover:bg-violet2-700 text-white text-[12px] font-medium">
-      {% if written %}Rewrite{% else %}Write it{% endif %}
+      {% if written %}Rewrite with these{% else %}Write it{% endif %}
     </button>
-    <span class="text-[11px] text-ink-faint">one {{ llm_label() }} request</span>
+    <span class="text-[11px] text-ink-faint pb-1.5">one {{ llm_label() }} request · rewrites the whole email</span>
   </form>
   {% if written %}
   <form method="post" action="/outreach/{{ step.id }}/drafts/clear" class="mt-1.5">
@@ -1620,9 +1732,16 @@
        section up — which is not true of the email draft, whose only home is
        here. Gating both on one flag hid the email entirely on the person
        page. #}
-    {% if show_draft and step.step_key in ('comment_1', 'comment_2') %}
+    {% if step.draft_kind == 'comment' %}
+    {# A LinkedIn step. The comment is the deliverable, so the email panel is
+       not shown: an empty one here reads as a fault rather than as a step that
+       is simply not due yet. `connect` has no body to write, so wants_draft
+       excludes it and the block renders nothing. #}
+    {% if show_draft and not step.draft_options and step.step_key in ('comment_1', 'comment_2') %}
     <div class="mt-2">{{ outreach_comment_draft(step, back=back) }}</div>
-    {% elif step.step_key == 'email' %}
+    {% endif %}
+    <div class="mt-2">{{ outreach_draft_block(step, back) }}</div>
+    {% else %}
     <div class="mt-2">{{ outreach_email_draft(step, back, prefs) }}</div>
     {% endif %}
 
@@ -1728,9 +1847,12 @@
       {% endif %}
 
       {# ---- what to say ---- #}
-      {% if step.step_key in ('comment_1', 'comment_2') %}
+      {% if step.draft_kind == 'comment' %}
+      {% if not step.draft_options and step.step_key in ('comment_1', 'comment_2') %}
       <div class="mt-3">{{ outreach_comment_draft(step, rows=3, back=back ~ '#task-' ~ person.slug) }}</div>
-      {% elif step.step_key == 'email' %}
+      {% endif %}
+      <div class="mt-3">{{ outreach_draft_block(step, back ~ '#task-' ~ person.slug) }}</div>
+      {% else %}
       <div class="mt-3">{{ outreach_email_draft(step, back ~ '#task-' ~ person.slug, prefs) }}</div>
       {% endif %}
 

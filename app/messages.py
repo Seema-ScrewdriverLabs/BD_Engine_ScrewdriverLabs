@@ -184,8 +184,18 @@ def _post_context(person, activity, db=None):
         bits.append("Already sent to this contact — do not repeat it:")
         bits.extend(sent)
     bits.append("")
-    bits.append("Post text (this is all you may reference):")
-    bits.append(substance_of(activity.text))
+    # A headline is not a body. LinkedIn will not be fetched — Firecrawl
+    # refuses the site — so for most rows the only words available are the
+    # ones LinkedIn itself put in the URL or the page title.
+    note = _opening_line_note(activity)
+    if note:
+        bits.append("The post's OPENING LINE (all that is available):")
+        bits.append(substance_of(activity.text))
+        bits.append("")
+        bits.append(note.strip())
+    else:
+        bits.append("Post text (this is all you may reference):")
+        bits.append(substance_of(activity.text))
     return "\n".join(bits)
 
 
@@ -237,6 +247,12 @@ def _already_sent(db, person, kind, limit=3):
         if text:
             out.append(f"- [{row.kind}] {text[:400]}")
     return out
+
+
+def _opening_line_note(activity):
+    """The warning to append when this row is a headline, or "" when it is not."""
+    return OPENING_LINE_NOTE if getattr(
+        activity, "text_is_headline", False) else ""
 
 
 def suggest_comment(person, activity, model=None, base_url=None, api_key=None,
@@ -297,7 +313,8 @@ def suggest_comment(person, activity, model=None, base_url=None, api_key=None,
         return {"reason": parsed.get("why")
                 or "the model judged the post too thin to reference"}
 
-    bad = reject_reason(comment)
+    bad = (reject_reason(comment) or too_long_for_linkedin(comment)
+           or reject_comment_signature(comment))
     if bad:
         return {"reason": f"draft discarded — {bad}"}
 
@@ -323,29 +340,49 @@ def draft_for_person(db, person, force=False, limit=None):
     out["skipped"] = len(person.activities) - len(rows)
 
     for activity in rows:
-        try:
-            result = suggest_comment(person, activity, db=db)
-        except LLMNotConfigured:
-            raise
-        except Exception as exc:
-            activity.suggested_note = f"drafting failed: {exc}"[:300]
-            activity.suggested_comment = None
-            out["no_draft"] += 1
-            continue
-
-        if "comment" in result:
-            activity.suggested_comment = result["comment"]
-            activity.suggested_note = None
-            activity.suggested_at = result["generated_at"]
-            activity.suggested_model = result["model"]
+        if draft_one(db, person, activity, commit=False):
             out["drafted"] += 1
         else:
-            activity.suggested_comment = None
-            activity.suggested_note = result["reason"][:300]
-            activity.suggested_at = datetime.now(timezone.utc)
             out["no_draft"] += 1
     db.commit()
     return out
+
+
+def draft_one(db, person, activity, commit=True):
+    """Draft the comment for a single post. True when one was written.
+
+    A refusal is not an exception: the reason is stored on the row so the
+    panel can say why this post got no comment, which is the same contract
+    draft_for_person has always had. LLMNotConfigured still propagates —
+    that is about the install, not about this post.
+    """
+    try:
+        result = suggest_comment(person, activity, db=db)
+    except LLMNotConfigured:
+        raise
+    except Exception as exc:
+        activity.suggested_note = f"drafting failed: {exc}"[:300]
+        activity.suggested_comment = None
+        activity.suggested_at = datetime.now(timezone.utc)
+        if commit:
+            db.commit()
+        return False
+
+    if "comment" in result:
+        activity.suggested_comment = result["comment"]
+        activity.suggested_note = None
+        activity.suggested_at = result["generated_at"]
+        activity.suggested_model = result["model"]
+        if commit:
+            db.commit()
+        return True
+
+    activity.suggested_comment = None
+    activity.suggested_note = result["reason"][:300]
+    activity.suggested_at = datetime.now(timezone.utc)
+    if commit:
+        db.commit()
+    return False
 
 
 # ===========================================================================
@@ -378,17 +415,48 @@ LINKEDIN_COMMENT_VISIBLE_CHARS = 250
 # prompt and bound the check; they are not presented to the reader as promises.
 COMMENT_LENGTHS = {
     "brief": {
-        "label": "Brief",
-        "words": (15, 30),
-        "note": "one sentence — stays visible in the feed without expanding",
+        "label": "Short",
+        "words": (12, 22),
+        "chars": 150,
+        "note": "one or two lines — a single thought",
     },
     "standard": {
         "label": "Standard",
-        "words": (30, 55),
-        "note": "two sentences, room for a specific reference and a question",
+        # Floor set from what a two-sentence comment under 250 characters
+        # actually comes out at, not from a round number: asking for 22 as the
+        # minimum produced 21s, which is the band arguing with the character
+        # cap rather than the draft being wrong.
+        "words": (20, 36),
+        "chars": LINKEDIN_COMMENT_VISIBLE_CHARS,
+        "note": "two or three lines — still inside the 250-character fold",
     },
 }
 DEFAULT_COMMENT_LENGTH = "brief"
+
+COMMENT_TONES = {
+    "agree": {
+        "label": "Agree and add",
+        "note": "back the point, add one thing",
+        "ask": "Agree with the specific point the post makes, then add one "
+               "thing it did not cover. No compliment on its own - the "
+               "addition is what earns the comment.",
+    },
+    "curious": {
+        "label": "Ask about it",
+        "note": "one genuine question",
+        "ask": "Ask one genuine question about the specific thing in the "
+               "post. It must be a question the post raises and does not "
+               "answer, not a question whose answer is already there.",
+    },
+    "experience": {
+        "label": "From experience",
+        "note": "what we have seen",
+        "ask": "Answer from having seen the same thing elsewhere. State what "
+               "happens in that situation, briefly and without naming "
+               "Screwdriver or pitching anything.",
+    },
+}
+DEFAULT_COMMENT_TONE = "agree"
 
 EMAIL_LENGTHS = {
     "short": {"label": "Short", "words": (60, 90),
@@ -566,7 +634,69 @@ def _band_reason(text, band, what):
     return None
 
 
-def reject_comment_option(text, evidence, band=None):
+def reject_comment_signature(text):
+    """Why this comment reads as signed or self-promoting, or None.
+
+    A comment is unsigned - LinkedIn already shows who left it, so a name or a
+    company at the end reads as an advert rather than as a person replying.
+    The prompt asks for this; this is the part that holds it, the same way
+    banned phrases are checked rather than merely requested.
+
+    Comment path only. The email is signed deliberately and its validator
+    checks the signature ARRIVED - see sender().
+    """
+    flat = _flatten(text or "")
+    if not flat:
+        return None
+    who = sender()
+    low = flat.lower()
+
+    company = (who.get("company") or "").strip()
+    if company and company.lower() in low:
+        return f"names {company} — a comment never mentions who you work for"
+
+    name = (who.get("name") or "").strip()
+    for candidate in filter(None, [name] + name.split()):
+        if len(candidate) < 3:
+            continue
+        # Only a sign-off counts. The same word earlier in the sentence may be
+        # the poster's own name or an ordinary word, and rejecting that would
+        # discard good comments for no reason.
+        tail = flat[-(len(candidate) + 18):].lower()
+        if candidate.lower() in tail:
+            return f"signed it ({candidate!r}) — a comment is unsigned"
+
+    role = (who.get("role") or "").strip()
+    if role and flat.rstrip().lower().endswith(role.lower()):
+        return f"ends with a job title ({role!r}) — a comment is unsigned"
+    return None
+
+
+def too_long_for_linkedin(text, ceiling=None):
+    """Why this comment is too long to work as a comment, or None.
+
+    Two ceilings, and the lower one is the one that matters. 1250 is what
+    LinkedIn refuses outright; 250 is where it hides the rest behind
+    "...see more", which for a cold comment is the same as not having written
+    it. The brief asks for one or two sentences and the app has to hold the
+    draft to that, because a rule only asked for in a prompt is a rule that
+    holds most of the time.
+
+    Used by both drafting paths - the options on an outreach step and the
+    single comment from the LinkedIn panel - so neither can drift from it.
+    """
+    flat = _flatten(text or "")
+    if len(flat) > LINKEDIN_COMMENT_MAX_CHARS:
+        return (f"{len(flat)} characters — LinkedIn refuses a comment over "
+                f"{LINKEDIN_COMMENT_MAX_CHARS}")
+    limit = ceiling or LINKEDIN_COMMENT_VISIBLE_CHARS
+    if len(flat) > limit:
+        return (f"{len(flat)} characters — over {limit}, so LinkedIn would "
+                f"collapse it behind “…see more”")
+    return None
+
+
+def reject_comment_option(text, evidence, band=None, chars=None):
     """Why this comment option is unusable, or None.
 
     `band` is the word range the reader asked for. Passing it makes the choice
@@ -578,9 +708,12 @@ def reject_comment_option(text, evidence, band=None):
     if bad:
         return bad
     flat = _flatten(text)
-    if len(flat) > LINKEDIN_COMMENT_MAX_CHARS:
-        return (f"{len(flat)} characters — LinkedIn refuses a comment over "
-                f"{LINKEDIN_COMMENT_MAX_CHARS}")
+    too_long = too_long_for_linkedin(flat, ceiling=chars)
+    if too_long:
+        return too_long
+    signed = reject_comment_signature(flat)
+    if signed:
+        return signed
     low = flat.lower()
     for marker in PLACEHOLDER_MARKERS:
         if marker in low:
@@ -680,6 +813,22 @@ def _call(system, user, temperature=None, model=None, base_url=None, api_key=Non
     return _llm.json_call(system, user)
 
 
+# What to say when all we hold is the post's first line. LinkedIn will not be
+# fetched (Firecrawl refuses the site outright), so this is the normal case,
+# not the exception — and a comment that pretends to more is the failure this
+# whole app is built to avoid.
+OPENING_LINE_NOTE = (
+    "WHAT YOU HAVE IS THE POST'S OPENING LINE ONLY, not the whole post. It is "
+    "the author's own words and it is what the post is about, but the rest is "
+    "not available to you.\n"
+    "So: respond to the topic, or ask about it. Do NOT refer to details, "
+    "numbers, conclusions or examples as though you had read them — there may "
+    "be none, and inventing them is worse than not commenting. A question "
+    "about what they go on to say is the strongest option here. If the opening "
+    "line is too thin even to ask about, return an empty list.\n\n"
+)
+
+
 COMMENT_OPTIONS_SYSTEM = """You are the head of marketing at Screwdriver, a \
 studio doing video and multimedia production, custom software, learning design \
 and AI-assisted content work. You are leaving a comment on a prospect's \
@@ -693,6 +842,14 @@ stranger's comment gets a reply.
 WRITE IT READY TO PASTE. The text you return is what goes in the comment box \
 exactly as written. No placeholders, no square brackets, no "[insert x]", no \
 notes to the reader, no two options separated by a slash, nothing to fill in.
+
+THE SHAPE. Two or three short lines, the way someone types into a comment box \
+on their phone. Not an email and not an essay: no greeting, no sign-off, no \
+name at the end, no initials, no closing line of any kind. LinkedIn already \
+shows who is commenting, so signing it reads as an advert. Plain words and \
+short sentences. It should read as an ordinary observation from someone in the \
+field, not as a position being staked out - if it sounds like the opening of a \
+blog post ("The real story here is...", "Most teams still..."), it is wrong.
 
 Rules, in order of importance:
 
@@ -719,7 +876,9 @@ pasted under a different post, delete it and write a real one.
 5. No flattery opener. Never "Great post", "Well said", "Insightful", "Thanks \
 for sharing", "Couldn't agree more", "Spot on", "Love this".
 
-6. No pitch, no offer, no mention of Screwdriver or what it sells, no link.
+6. No pitch, no offer, no mention of Screwdriver or what it sells, no link, \
+and never sign it. No name, no "- Rahul", no role, no company. A comment is \
+unsigned.
 
 7. Each option must take a genuinely DIFFERENT angle — agree and extend, \
 challenge one specific part, ask about the mechanics of what they did, add a \
@@ -816,7 +975,8 @@ or {"options": [], "why": "why none are possible"}"""
 
 
 def suggest_comment_options(person, target, length=DEFAULT_COMMENT_LENGTH,
-                            count=OPTION_COUNT, **llm):
+                            tone=DEFAULT_COMMENT_TONE, count=OPTION_COUNT,
+                            **llm):
     """Alternative comments for one post.
 
     Returns {"options": [...]} — possibly empty — or {"reason": "..."}. One
@@ -825,6 +985,9 @@ def suggest_comment_options(person, target, length=DEFAULT_COMMENT_LENGTH,
     """
     spec = COMMENT_LENGTHS.get(length) or COMMENT_LENGTHS[DEFAULT_COMMENT_LENGTH]
     low, high = spec["words"]
+    char_cap = spec.get("chars") or LINKEDIN_COMMENT_VISIBLE_CHARS
+    tone = tone if tone in COMMENT_TONES else DEFAULT_COMMENT_TONE
+    tone_spec = COMMENT_TONES[tone]
     post = target["text"]
 
     company = person.company.name if person.company else "unknown"
@@ -835,11 +998,23 @@ def suggest_comment_options(person, target, length=DEFAULT_COMMENT_LENGTH,
         f"Person: {person.full_name}\n"
         f"Their title: {person.title or 'unknown'}\n"
         f"Their employer: {company}\n"
-        f"Give exactly {count} options, each {low}-{high} words.\n\n"
+        # A target, not only a range. The email bands taught this:
+        # given "15 to 30 words" the ceiling reads as advisory and the
+        # drafts drift past it; given a number to aim at they land.
+        f"Give exactly {count} options. This is a LinkedIn comment, not "
+        f"an email: one or two sentences, on one or two lines. No "
+        f"paragraphs, no sign-off, no greeting.\n"
+        f"Each one {low} to {high} words - aim for about "
+        f"{(low + high) // 2} - and under {char_cap} characters, which "
+        f"is a hard limit: past it LinkedIn hides the rest behind "
+        f"\u201c…see more\u201d and the comment may as well not be there. "
+        f"Count both before you answer.\n"
+        f"What each comment should do: {tone_spec['ask']}\n\n"
         f"THE POST TO COMMENT ON ({target['label']}) — this is the only thing "
         f"an option may reference directly:\n{post}\n\n"
-        "Background, for judgement only. Do not quote from it; the comment must "
-        "read as a reply to the post above:\n"
+        + (OPENING_LINE_NOTE if target.get("headline_only") else "")
+        + ("Background, for judgement only. Do not quote from it; the comment "
+           "must read as a reply to the post above:\n")
         + (_signal_block(extra, cap=4) or "- nothing else on file")
     )
 
@@ -861,7 +1036,8 @@ def suggest_comment_options(person, target, length=DEFAULT_COMMENT_LENGTH,
         if not grounding:
             discarded.append("an option arrived with no grounding stated")
             continue
-        bad = reject_comment_option(text, post, band=(low, high))
+        bad = reject_comment_option(text, post, band=(low, high),
+                                    chars=char_cap)
         if bad:
             discarded.append(bad)
             continue
@@ -870,7 +1046,7 @@ def suggest_comment_options(person, target, length=DEFAULT_COMMENT_LENGTH,
             "body": text,
             "subject": None,
             "length": length,
-            "tone": None,
+            "tone": tone,
             "basis": f"{target['label']}; grounded in: {grounding}"[:600],
             "activity_id": target.get("activity_id"),
             "model": model,
@@ -1048,6 +1224,7 @@ def suggest_for_step(db, person, step, tone=None, length=None):
         result = suggest_comment_options(
             person, verdict["target"],
             length=length or DEFAULT_COMMENT_LENGTH,
+            tone=tone or DEFAULT_COMMENT_TONE,
         )
     else:
         result = suggest_email_options(
@@ -1071,9 +1248,9 @@ def suggest_for_step(db, person, step, tone=None, length=None):
 # never calls a model. This one hands the research to the model under the
 # brief in skills/ and asks it to write the email — more personal, and
 # non-deterministic, which is the trade. The two disagree by design: the
-# template is ~155 words around fixed brand blocks; the brief says 80-120
-# words with no boilerplate at all. The brief wins here because the brief is
-# what this function is for.
+# template is ~155 words around fixed brand blocks and never varies; this
+# one is written to whatever length the reader asked for, from 120 words to
+# 280. Which to send is a judgement about the lead, so both are offered.
 # ===========================================================================
 
 EMAIL_SCHEMA = {
@@ -1146,7 +1323,67 @@ def email_research(person, db=None):
     return "\n".join(bits)
 
 
-def skill_email(person, db=None):
+# The same three tones the composed template offers, so the panel speaks one
+# vocabulary. Here they are an instruction rather than a swap of fixed phrases,
+# because this email is written rather than assembled.
+SKILL_TONES = {
+    "warm": {"label": "Warm", "note": "peer to peer",
+             "ask": "Warm, peer to peer. Write as one practitioner to another: "
+                    "plain, friendly, a little informal. Contractions are fine."},
+    "direct": {"label": "Direct", "note": "straight to the point",
+               "ask": "Direct. Lead with the observation, cut every warm-up "
+                      "clause, shortest sentences that still read as human. No "
+                      "pleasantries at either end."},
+    "formal": {"label": "Formal", "note": "for senior contacts",
+               "ask": "Formal and measured, for a senior contact. Full "
+                      "sentences, no contractions, no slang, courteous without "
+                      "being deferential. Still specific; formal does not mean "
+                      "vague."},
+}
+DEFAULT_SKILL_TONE = "warm"
+
+# Length bands for the written email. The brief no longer fixes a number of
+# its own — this dial is where the count comes from, and Medium is the
+# default.
+#
+# The band travels all the way through: it is stated in the prompt AND used by
+# the validator below. Asking for a short email and then rejecting it for being
+# short is the obvious way to get this wrong.
+SKILL_LENGTHS = {
+    # Each ask names a target and a hard floor, not just a range. Stating only
+    # a range plus "nothing else earns a line" made Short land at 105-116 words
+    # across three different contacts - the brevity language won and the floor
+    # was ignored. A number to aim at is what the model actually follows.
+    "short": {"label": "Short", "note": "120-160 words", "words": (120, 160),
+              "ask": "Aim for about 140 words. Never fewer than 120 - a draft "
+                     "under 120 words is wrong even if it reads well. One "
+                     "signal, one bridge to what we do, one ask, each given a "
+                     "full sentence rather than a clause."},
+    "medium": {"label": "Medium", "note": "160-220 words", "words": (160, 220),
+               "ask": "Aim for about 190 words in three or four short "
+                      "paragraphs: the signal and where you saw it; why it "
+                      "matters to someone in their role; one specific about "
+                      "how the work would run; the ask. Two or three sentences "
+                      "each. Never fewer than 160 words - the extra length "
+                      "comes from a second concrete detail, never from more "
+                      "throat-clearing."},
+    "detailed": {"label": "Detailed", "note": "220-280 words",
+                 "words": (220, 280),
+                 "ask": "Aim for about 250 words in four or five short "
+                        "paragraphs. You reach that by covering more ground, "
+                        "never by padding: what you noticed and where you saw "
+                        "it; what it usually means for a company at that "
+                        "point; what a first piece of work would actually "
+                        "involve; one proof point from what Screwdriver has "
+                        "done; the ask. Two or three sentences each, every one "
+                        "carrying a fact from the research. Never fewer than "
+                        "220 words - if you are short, you have left one of "
+                        "those beats out."},
+}
+DEFAULT_SKILL_LENGTH = "medium"
+
+
+def skill_email(person, db=None, tone=None, length=None):
     """Draft one personalised cold email under the brief in skills/.
 
     Returns {"subject", "body", "signal", "opportunity", "confidence", "why",
@@ -1159,11 +1396,25 @@ def skill_email(person, db=None):
     Raises LLMNotConfigured when no provider has a key.
     """
     memory = _profile_block(db, person, "email")
-    system = _skills.email_system(memory=memory)   # SkillMissing propagates
-    parsed, model = _llm.json_call(system, email_research(person, db=db),
-                                   schema=EMAIL_SCHEMA)
+    tone = tone if tone in SKILL_TONES else DEFAULT_SKILL_TONE
+    length = length if length in SKILL_LENGTHS else DEFAULT_SKILL_LENGTH
+    spec = SKILL_LENGTHS[length]
+    research = email_research(person, db=db)
+    low, high = spec["words"]
+
+    def attempt(note=""):
+        system = _skills.email_system(memory=memory,
+                                      tone=SKILL_TONES[tone]["ask"],
+                                      length=spec["ask"] + note)
+        detail = {}
+        parsed, model = _llm.json_call(system, research, schema=EMAIL_SCHEMA,
+                                       detail=detail)
+        return parsed, model, detail
+
+    parsed, model, detail = attempt()      # SkillMissing propagates
     if parsed is None:
-        return {"reason": "the model returned nothing usable"}
+        return {"reason": detail.get("error") or "the model returned nothing "
+                                                 "usable"}
 
     subject = (parsed.get("subject") or "").strip()
     body = (parsed.get("body") or "").strip()
@@ -1172,16 +1423,44 @@ def skill_email(person, db=None):
 
     # The brief says an unsupportable lead gets a stated refusal rather than a
     # forced email, and returns Low with the fields empty. Honour that instead
-    # of treating it as a malformed reply.
+    # of treating it as a malformed reply. A refusal is never retried - it is
+    # the right answer, and asking again only spends a second call to get it.
     if not body:
         return {"reason": why or "the research would not support a personalised "
                                  "email, so none was written"}
 
+    # One correction pass on an undershoot, with the real count fed back.
+    # Without it the longer bands quietly settled around 200 words however
+    # emphatically the floor was stated - the model needs to be told it missed,
+    # not told the rule again. The better of the two is kept, so a worse second
+    # attempt cannot leave the result worse than not retrying at all.
     words = _skills.word_count(body)
-    low, high = _skills.EMAIL_WORDS
+    if words < low:
+        retry, model2, _ = attempt(
+            f"\n\nYour previous attempt came back at {words} words, "
+            f"{low - words} short of the {low} word minimum, and was rejected. "
+            f"Write it again at the full length. Find the missing words in the "
+            f"research - another specific you left out - not in padding, "
+            f"restatement or a longer sign-off.")
+        if retry:
+            body2 = (retry.get("body") or "").strip()
+            words2 = _skills.word_count(body2)
+            # How far OUTSIDE the band, not how far from the floor: measuring
+            # distance to the floor made a 248-word retry tie with the
+            # 192-word draft it was correcting, and lose the tie.
+            def miss(w):
+                return max(low - w, w - high, 0)
+            if body2 and miss(words2) < miss(words):
+                parsed, model, body, words = retry, model2, body2, words2
+                subject = (retry.get("subject") or "").strip() or subject
+                confidence = (retry.get("confidence")
+                              or confidence).strip().title()
+                why = (retry.get("why") or why).strip()
+
+    # Checked against the band that was ASKED for, not the brief's fixed one.
     if not (low * 0.8 <= words <= high * 1.25):
-        return {"reason": f"draft discarded - {words} words against the brief's "
-                          f"{low}-{high}"}
+        return {"reason": f"draft discarded - {words} words against the "
+                          f"{low}-{high} asked for"}
 
     extra = _banned_from_profile(db, "email")
     hit = (_skills.banned_hits(body, "email", extra=extra)
@@ -1194,6 +1473,8 @@ def skill_email(person, db=None):
         return {"reason": f"draft discarded - {bad}"}
 
     return {
+        "tone": tone,
+        "length": length,
         "subject": subject,
         "body": body,
         "signal": (parsed.get("signal") or "").strip(),

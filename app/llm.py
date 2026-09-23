@@ -58,7 +58,7 @@ GROQ_BASE_URL_DEFAULT = "https://api.groq.com/openai/v1"
 
 # Generous for what these prompts ask for, and well under the point where the
 # Anthropic SDK wants streaming to dodge an HTTP timeout.
-DEFAULT_MAX_TOKENS = 4000
+DEFAULT_MAX_TOKENS = 16000
 
 # Groq still has a temperature dial. One value for every call, rather than the
 # old per-task 0.2 / 0.4 / 0.6: Claude has no such dial, and two providers that
@@ -66,7 +66,7 @@ DEFAULT_MAX_TOKENS = 4000
 # default. What each task wants is stated in its prompt either way.
 GROQ_TEMPERATURE = 0.4
 
-TIMEOUT = 60.0
+TIMEOUT = 120.0
 
 
 class LLMNotConfigured(RuntimeError):
@@ -107,24 +107,48 @@ def spec(name=None):
     return PROVIDERS[name or provider()]
 
 
+def _legacy_key():
+    return (os.environ.get("LLM_API_KEY") or "").strip()
+
+
+def _legacy_is_claude():
+    """Whether the pre-provider-choice settings describe Claude, not Groq.
+
+    LLM_API_KEY and LLM_MODEL predate there being two providers, so they were
+    read as Groq's. But an Anthropic key is unmistakable — it starts sk-ant- —
+    and a model named claude-* is not something Groq serves. Pasting those into
+    the old variables is the obvious thing to do, and reading them as Groq sent
+    a Claude model name to Groq's endpoint with the wrong kind of key: a
+    guaranteed failure that named neither cause.
+    """
+    if _legacy_key().startswith("sk-ant-"):
+        return True
+    return (os.environ.get("LLM_MODEL") or "").strip().startswith("claude-")
+
+
 def api_key(name=None):
     name = name or provider()
     key = (os.environ.get(PROVIDERS[name]["key_var"]) or "").strip()
-    # LLM_API_KEY is what this app called the Groq key before there was a
-    # choice of provider. Read as a fallback so an existing .env keeps working
-    # without anyone re-pasting a key they already had.
-    if not key and name == GROQ:
-        key = (os.environ.get("LLM_API_KEY") or "").strip()
-    return key
+    if key:
+        return key
+    # Fall back to the legacy variable, for whichever provider it describes.
+    legacy = _legacy_key()
+    if legacy and (name == CLAUDE) == _legacy_is_claude():
+        return legacy
+    return ""
 
 
 def model_name(name=None):
     name = name or provider()
     s = PROVIDERS[name]
-    chosen = (os.environ.get(s["model_var"]) or "").strip()
-    if not chosen and name == GROQ:
-        chosen = (os.environ.get("LLM_MODEL") or "").strip()   # same legacy
-    return chosen or s["default_model"]
+    picked = (os.environ.get(s["model_var"]) or "").strip()
+    if not picked:
+        legacy = (os.environ.get("LLM_MODEL") or "").strip()
+        # Only if it belongs to this provider — a claude-* name must never be
+        # handed to the OpenAI-compatible endpoint, or the other way round.
+        if legacy and (name == CLAUDE) == _legacy_is_claude():
+            picked = legacy
+    return picked or s["default_model"]
 
 
 def configured(name=None):
@@ -136,7 +160,7 @@ def label(name=None):
 
 
 # --------------------------------------------------------------- Claude ----
-def _claude_call(system, user, schema, max_tokens, key, model):
+def _claude_call(system, user, schema, max_tokens, key, model, detail=None):
     import anthropic
 
     # The key is passed explicitly rather than left to the SDK's env lookup,
@@ -157,8 +181,21 @@ def _claude_call(system, user, schema, max_tokens, key, model):
 
     # A safety decline is an HTTP 200 with no usable content, so it has to be
     # checked before reading the blocks rather than after.
-    if getattr(response, "stop_reason", None) == "refusal":
+    stop = getattr(response, "stop_reason", None)
+    if detail is not None:
+        detail["stop_reason"] = stop
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            detail["output_tokens"] = getattr(usage, "output_tokens", None)
+    if stop == "refusal":
+        if detail is not None:
+            detail["error"] = "the model declined this request"
         return None
+    if stop == "max_tokens" and detail is not None:
+        # The reply was cut off mid-sentence, so the JSON will not parse. Worth
+        # naming, because "nothing usable" reads as the model's fault.
+        detail["error"] = (f"the reply hit the {max_tokens}-token ceiling and "
+                           f"was cut off")
     return "".join(b.text for b in response.content if b.type == "text").strip()
 
 
@@ -189,7 +226,8 @@ def _groq_call(system, user, max_tokens, key, model):
 
 
 # ------------------------------------------------------------ the front ----
-def json_call(system, user, schema=None, max_tokens=DEFAULT_MAX_TOKENS):
+def json_call(system, user, schema=None, max_tokens=DEFAULT_MAX_TOKENS,
+              detail=None):
     """Ask the configured model for JSON.
 
     Returns (parsed, model) — parsed is None if the reply would not parse, or
@@ -208,17 +246,32 @@ def json_call(system, user, schema=None, max_tokens=DEFAULT_MAX_TOKENS):
         )
 
     if name == CLAUDE:
-        text = _claude_call(system, user, schema, max_tokens, key, model)
+        text = _claude_call(system, user, schema, max_tokens, key, model,
+                            detail=detail)
     else:
         text = _groq_call(system, user, max_tokens, key, model)
 
+    # `detail` is filled in as we go so a caller can say WHY nothing came back.
+    # Collapsing an empty reply, a refusal, a cut-off answer and unparseable
+    # JSON into one None made every one of them read as "nothing usable", which
+    # is the least useful thing the app could say about any of them.
+    if detail is not None:
+        detail.setdefault("chars", len(text or ""))
     if not text:
+        if detail is not None:
+            detail.setdefault("error", "the reply was empty")
         return None, model
     try:
         parsed = json.loads(text)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as exc:
+        if detail is not None:
+            detail.setdefault("error", f"the reply was not valid JSON ({exc})")
         return None, model
-    return (parsed if isinstance(parsed, dict) else None), model
+    if not isinstance(parsed, dict):
+        if detail is not None:
+            detail.setdefault("error", "the reply was JSON but not an object")
+        return None, model
+    return parsed, model
 
 
 def check_key(key=None, name=None):

@@ -107,7 +107,7 @@ export FIRECRAWL_API_KEY=fc-...</pre>
         <span class="text-[10.5px] font-semibold text-amber-700">no key yet</span>
         {% endif %}
       </div>
-      <p class="text-[12px] text-ink-faint mb-3">The web search behind company research and LinkedIn activity. Without it the Research button has nothing to call.</p>
+      <p class="text-[12px] text-ink-faint mb-3">The web search behind company research and the web panel. Firecrawl cannot read LinkedIn — it refuses the site — so posts come from Apify below.</p>
 
       <label class="block">
         <span class="block text-[12.5px] font-medium mb-1">API key</span>
@@ -116,6 +116,33 @@ export FIRECRAWL_API_KEY=fc-...</pre>
                class="w-full h-9 px-3 rounded-lg bg-white border border-[#E2E3E8] text-[13px] font-mono outline-none focus:border-violet2-300">
         <span class="block text-[11.5px] text-ink-faint mt-1">
           From <a href="https://firecrawl.dev" target="_blank" rel="noopener" class="text-violet2-600 hover:underline">firecrawl.dev</a>.
+        </span>
+      </label>
+    </section>
+
+    <section class="card shadow-card p-5">
+      <div class="flex items-baseline justify-between gap-3 mb-1">
+        <h3 class="text-[15px] font-bold">Apify — LinkedIn posts</h3>
+        {% if apify_on %}
+        <span class="text-[10.5px] font-semibold text-emerald-700">key on file</span>
+        {% else %}
+        <span class="text-[10.5px] font-semibold text-amber-700">no key yet</span>
+        {% endif %}
+      </div>
+      <p class="text-[12px] text-ink-faint mb-3">
+        Reads each contact's posts from their own profile, using the LinkedIn URL that came in on the CSV.
+        That is where the post text and the exact date come from. Without it the app falls back to web search,
+        which returns other people's posts and rarely the latest.
+      </p>
+
+      <label class="block">
+        <span class="block text-[12.5px] font-medium mb-1">API token</span>
+        <input type="password" name="apify_api_key" autocomplete="off" spellcheck="false"
+               placeholder="{{ 'leave blank to keep the token already saved' if apify_on else 'apify_api_...' }}"
+               class="w-full h-9 px-3 rounded-lg bg-white border border-[#E2E3E8] text-[13px] font-mono outline-none focus:border-violet2-300">
+        <span class="block text-[11.5px] text-ink-faint mt-1">
+          From <a href="https://console.apify.com/settings/integrations" target="_blank" rel="noopener" class="text-violet2-600 hover:underline">console.apify.com → Integrations</a>.
+          Runs the <span class="font-mono text-[11px]">{{ apify_actor }}</span> actor, which needs no LinkedIn account or cookies.
         </span>
       </label>
     </section>
@@ -144,6 +171,12 @@ export FIRECRAWL_API_KEY=fc-...</pre>
       <form method="post" action="/settings">
         <input type="hidden" name="clear" value="FIRECRAWL_API_KEY">
         <button class="h-8 px-3 rounded-lg border border-[#EAEBEF] text-[12px] text-ink-soft hover:text-rose-600 hover:bg-[#FAFAFB]">Remove Firecrawl key</button>
+      </form>
+      {% endif %}
+      {% if apify_on %}
+      <form method="post" action="/settings">
+        <input type="hidden" name="clear" value="APIFY_API_KEY">
+        <button class="h-8 px-3 rounded-lg border border-[#EAEBEF] text-[12px] text-ink-soft hover:text-rose-600 hover:bg-[#FAFAFB]">Remove Apify token</button>
       </form>
       {% endif %}
     </div>

@@ -107,6 +107,62 @@
   {% block content %}{% endblock %}
 </main>
 
+{# Hold the scroll position across a form POST.
+
+   Every action here is a form that posts, redirects and reloads, so without
+   this the page comes back at the top and whatever you pressed is off screen.
+   The anchors some buttons carry (#p-slug, #act-id) are the no-JS fallback
+   and still work; this is more precise, because it restores the exact
+   position rather than the top of a row.
+
+   Only form submits are recorded, not every navigation: clicking a nav link
+   or a contact should land at the top of the new page, which is what it
+   already does. The saved position is dropped after one use and after thirty
+   seconds, so it can never resurface on an unrelated visit. #}
+<script>
+(function () {
+  var KEY = 'peopleintel:scroll';
+  var MAX_AGE_MS = 30000;
+
+  function here() { return location.pathname; }
+
+  function remember() {
+    try {
+      sessionStorage.setItem(KEY, JSON.stringify({
+        path: here(),
+        y: window.scrollY || document.documentElement.scrollTop || 0,
+        at: Date.now()
+      }));
+    } catch (e) { /* private window, or storage disabled */ }
+  }
+
+  // Exposed so the research auto-refresh can hold the position too — its
+  // reload is the same kind of interruption as a button press.
+  window.__piHoldScroll = remember;
+
+  // Capture phase: a handler that stops propagation must not cost us the
+  // position. Submit rather than click, so a button that does not submit
+  // (copy, a details toggle) never records one.
+  document.addEventListener('submit', remember, true);
+
+  try {
+    var raw = sessionStorage.getItem(KEY);
+    if (raw) {
+      sessionStorage.removeItem(KEY);
+      var saved = JSON.parse(raw);
+      if (saved && saved.path === here() && saved.y > 0
+          && (Date.now() - saved.at) < MAX_AGE_MS) {
+        // After load, so it wins over the browser applying a #fragment —
+        // the exact position is a better answer than the top of the row.
+        window.addEventListener('load', function () {
+          window.scrollTo(0, saved.y);
+        });
+      }
+    }
+  } catch (e) { /* a malformed entry is not worth a broken page */ }
+})();
+</script>
+
 {# Copy buttons on drafted messages. JavaScript because the clipboard has no
    HTML-only equivalent — a form cannot put text on it. One delegated listener
    for the whole app rather than a handler per draft: the outreach board can
@@ -209,6 +265,7 @@ document.addEventListener('click', function (e) {
       setTimeout(tick, 4000);     // still typing - ask again shortly
       return;
     }
+    if (window.__piHoldScroll) window.__piHoldScroll();
     location.reload();
   }
   setTimeout(tick, 8000);         // a run is tens of seconds, not four

@@ -311,9 +311,29 @@ class Person(Base):
     #     second click landing mid-run, the same job research_status/RUNNING
     #     does for the full pipeline, but kept separate so refreshing this one
     #     panel doesn't flip the whole record back to "Researching…".
+    # Which CSV this contact arrived on. See models.Import.
+    import_id = Column(Integer, ForeignKey("imports.id"), index=True)
+    source_import = relationship("Import", back_populates="people")
+
     linkedin_refreshing = Column(Boolean, default=False)
     linkedin_refreshed_at = Column(DateTime)
     linkedin_refresh_error = Column(String)
+
+    # The POSTS panel, as opposed to linkedin_source above, which is about
+    # where the profile URL came from. See db.ADDED_COLUMNS.
+    linkedin_posts_source = Column(String)      # "apify" | "firecrawl"
+    linkedin_posts_checked_at = Column(DateTime)
+    linkedin_posts_note = Column(String)        # e.g. "no posts on this profile"
+
+    @property
+    def linkedin_checked(self):
+        """Whether anyone has actually looked for this contact's posts.
+
+        An empty panel means two completely different things — nobody has
+        looked, or we looked and they do not post — and the reader can only
+        act on the second. Without this they render the same.
+        """
+        return self.linkedin_posts_checked_at is not None
 
     # --- derived: the "Current Focus" sentence under the interest chips
     focus_line = Column(Text)
@@ -702,6 +722,66 @@ class Person(Base):
         return self.enrichment_status
 
 
+class Import(Base):
+    """One CSV upload, and what it did.
+
+    Kept so the app can say where a contact came from and so an upload can be
+    undone. The counts are the importer's own — recorded rather than
+    recomputed, because "how many did this file create" stops being
+    answerable the moment a later file updates some of the same people.
+    """
+    __tablename__ = "imports"
+
+    id = Column(Integer, primary_key=True)
+    filename = Column(String)
+    uploaded_at = Column(DateTime, default=utcnow, index=True)
+    size_bytes = Column(Integer, default=0)
+
+    # Straight from importer.import_csv's summary.
+    rows = Column(Integer, default=0)          # data rows in the file
+    created = Column(Integer, default=0)       # people it added
+    updated = Column(Integer, default=0)       # people it matched and filled in
+    failed = Column(Integer, default=0)        # rows it could not use
+    needs_enrichment = Column(Integer, default=0)
+    columns_matched = Column(Integer, default=0)
+    columns_seen = Column(Integer, default=0)
+    notes = Column(Text)                       # newline-joined
+    errors = Column(Text)                      # newline-joined
+
+    people = relationship("Person", back_populates="source_import")
+
+    @property
+    def label(self):
+        return self.filename or "upload.csv"
+
+    @property
+    def still_here(self):
+        """How many of the contacts it created are still in the database.
+
+        Not the same as `created`: contacts get deleted, and a later upload
+        can merge two records. The delete button has to offer the real number
+        rather than the one from the day of the upload.
+        """
+        return len(self.people)
+
+    @property
+    def size_label(self):
+        n = self.size_bytes or 0
+        if n >= 1024 * 1024:
+            return f"{n / (1024 * 1024):.1f} MB"
+        if n >= 1024:
+            return f"{n / 1024:.0f} KB"
+        return f"{n} bytes"
+
+    @property
+    def note_lines(self):
+        return [n for n in (self.notes or "").split("\n") if n.strip()]
+
+    @property
+    def error_lines(self):
+        return [e for e in (self.errors or "").split("\n") if e.strip()]
+
+
 class LinkedInActivity(Base):
     """
     Either pasted by hand on the person's page, or found in the web search
@@ -740,6 +820,20 @@ class LinkedInActivity(Base):
     suggested_at = Column(DateTime)
     suggested_model = Column(String)
 
+    # "snippet" | "headline" | None. See db.ADDED_COLUMNS.
+    text_source = Column(String)
+
+    @property
+    def text_is_headline(self):
+        """The text is the post's opening line, not its body.
+
+        Firecrawl will not fetch a LinkedIn post, so for most rows the only
+        words we have are the ones LinkedIn put in the URL and the title. They
+        are the author's, and they are the topic — but a comment written from
+        them must not pretend to have read the rest.
+        """
+        return self.text_source == "headline"
+
     # Same two tiers the web findings use. True only when the post URL's author
     # segment matches this contact's profile slug; False for anything found by
     # name, which may be a namesake. Hand-pasted rows are trusted outright — a
@@ -759,7 +853,19 @@ class LinkedInActivity(Base):
 
     @property
     def from_search(self):
-        return self.added_by == "search"
+        """Fetched automatically, rather than pasted in by a person.
+
+        Both providers count. The name predates Apify and is kept because it
+        is what the rest of the code asks — the question it answers is "may a
+        refresh replace this row", and the answer is yes for anything a
+        provider produced and no for anything typed by hand.
+        """
+        return self.added_by in ("search", "apify")
+
+    @property
+    def from_apify(self):
+        """Read off the contact's own profile, not matched by name."""
+        return self.added_by == "apify"
 
     @property
     def trusted(self):

@@ -10,7 +10,7 @@ import re
 import unicodedata
 
 from .models import (
-    Company, Person, STATUS_COMPLETE, STATUS_NEEDS_ENRICHMENT,
+    Company, Import, Person, STATUS_COMPLETE, STATUS_NEEDS_ENRICHMENT,
 )
 
 # Aliases per logical field, first match wins. Lowercased, non-alnum stripped.
@@ -346,7 +346,14 @@ def _li_key(url):
 
 
 def import_csv(db, file_bytes, filename="upload.csv"):
-    """Returns a summary dict that feeds the stat tiles."""
+    """Returns a summary dict that feeds the stat tiles.
+
+    Also records the upload itself, and stamps every contact it creates with
+    it, so the Reports page can say where a contact came from and an upload
+    can be undone. A file that fails to decode or parse records nothing: there
+    is no import to undo, and a row for it would be a list entry that deletes
+    nothing.
+    """
     if file_bytes[:2] in (b"\xff\xfe", b"\xfe\xff"):
         attempts = ("utf-16", "utf-8-sig", "utf-8", "latin-1")
     else:
@@ -555,6 +562,28 @@ def import_csv(db, file_bytes, filename="upload.csv"):
             "Apollo Contact Id) and updated it instead of adding a duplicate. "
             "Research already attached to those contacts was kept."
         )
+    # Recorded after the run, from the run's own counts: recomputing "how
+    # many did this file create" stops being possible the moment a later file
+    # updates some of the same people.
+    record = Import(
+        filename=filename,
+        size_bytes=len(file_bytes or b""),
+        rows=total,
+        created=imported,
+        updated=updated,
+        failed=failed,
+        needs_enrichment=needs,
+        columns_matched=len(colmap),
+        columns_seen=len(fieldnames),
+        notes="\n".join(notes or []),
+        errors="\n".join(errors[:10] or []),
+    )
+    db.add(record)
+    db.flush()
+    for person in added:                 # the importer's own list
+        person.import_id = record.id
+    db.commit()
+
     return {
         "total": total,
         "imported": imported,
@@ -566,4 +595,5 @@ def import_csv(db, file_bytes, filename="upload.csv"):
         "columns_matched": len(colmap),
         "columns_seen": len(fieldnames),
         "filename": filename,
+        "import_id": record.id,
     }

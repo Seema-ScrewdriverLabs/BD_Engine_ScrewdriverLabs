@@ -87,6 +87,12 @@ def _activity_signals(person):
             "url": activity.url,
             "activity_id": activity.id,
             "words": len(body.split()),
+            # The date itself, not just the label: comment_target ranks on it.
+            "posted": activity.activity_date,
+            # True when `text` is the post's opening line rather than its body
+            # — see LinkedInActivity.text_is_headline. The prompt has to know,
+            # or it writes as though it had read the rest.
+            "headline_only": bool(activity.text_is_headline),
         })
     return out
 
@@ -190,18 +196,40 @@ def personal_signals(person):
     return [s for s in signals(person) if s["tier"] != TIER_ROLE]
 
 
+# Below this, a post is a one-line congratulation rather than something with
+# an idea in it — "Celebrating X's growth from A to D", eleven words. There is
+# nothing specific enough in one to ground a comment, so it loses to a post
+# that has something to say however recent it is. Above it, recency decides.
+#
+# Calibrated against real posts: on one contact the candidates were 13, 48,
+# 11, 52 and 17 words. Twenty separates the two real posts from the three
+# acknowledgements.
+COMMENT_MIN_WORDS = 20
+
+
 def comment_target(person, prefer_index=0):
     """The post a comment should reply to, or None.
 
-    Ordered by how much there is to reference, then by recency: a post with 60
-    words of the person's own argument makes a better comment than a two-line
-    one published yesterday. `prefer_index` lets the second comment step pick
-    the next post down rather than commenting twice on the same one.
+    Recency decides, among posts with enough in them to reference.
+
+    Sorting by length alone — which this did — picked a thirteen-day-old post
+    of 52 words over a two-day-old one of 48. Four words is not worth eleven
+    days: a LinkedIn comment is read in the window the post is live, and a
+    reply to something from a fortnight ago is a reply nobody sees. The
+    docstring already claimed "then by recency" while the sort key had no
+    date in it at all.
+
+    `prefer_index` lets the second comment step pick the next post down rather
+    than commenting twice on the same one.
     """
     rows = _activity_signals(person)
     if not rows:
         return None
-    rows.sort(key=lambda s: -s["words"])
+    rows.sort(key=lambda s: (
+        s["words"] < COMMENT_MIN_WORDS,          # something to reference
+        -(s["posted"].toordinal() if s.get("posted") else 0),   # newest
+        -s["words"],                             # then the fuller one
+    ))
     if prefer_index < len(rows):
         return rows[prefer_index]
     return rows[0]

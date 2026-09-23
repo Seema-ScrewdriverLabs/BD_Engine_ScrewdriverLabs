@@ -9,6 +9,56 @@
     <p class="text-[13px] text-ink-faint mt-0.5">Who actually has a public footprint. Coverage is uneven by design — seniority drives it.</p>
   </div>
 
+  {# The batch. Serial and paced on purpose: the failures on this data are
+     Firecrawl 429s, which is requests per minute rather than credits, so
+     firing them all at once is the one approach guaranteed not to finish. #}
+  <section class="card shadow-card p-4">
+    <div class="flex items-center gap-3 flex-wrap">
+      {% if queue.running %}
+      <span class="inline-flex items-center gap-2 text-[13px] font-semibold text-violet2-700">
+        <span class="w-2 h-2 rounded-full bg-violet2-500 animate-pulse"></span>
+        Researching {{ queue.done }} of {{ queue.total }}{% if queue.current %} — {{ queue.current }}{% endif %}
+      </span>
+      {% if queue.failed %}<span class="text-[12px] text-amber-700">{{ queue.failed }} failed</span>{% endif %}
+      <form method="post" action="/research/batch/stop" class="ml-auto">
+        <input type="hidden" name="back" value="/research">
+        <button class="h-8 px-3 rounded-lg border border-[#E2E3E8] bg-white hover:bg-[#FAFAFB] text-[12px] font-medium">Stop after this one</button>
+      </form>
+      {% else %}
+      <form method="post" action="/research/batch" class="flex items-end gap-2 flex-wrap">
+        <input type="hidden" name="back" value="/research">
+        <label class="block">
+          <span class="block text-[10px] uppercase tracking-wide text-ink-faint mb-0.5">How many</span>
+          <select name="limit" class="h-8 px-2 rounded-lg bg-white border border-[#E2E3E8] text-[12px] outline-none focus:border-violet2-300">
+            {% for n in batch_sizes %}<option value="{{ n }}" {{ 'selected' if n == 25 }}>{{ n }} contacts</option>{% endfor %}
+          </select>
+        </label>
+        <button class="h-8 px-3 rounded-lg bg-violet2-600 hover:bg-violet2-700 text-white text-[12px] font-medium">Research the next batch</button>
+        <span class="text-[11px] text-ink-faint pb-1.5">
+          {{ unresearched }} still unresearched · one at a time, {{ gap }}s apart, to stay under the rate limit · spends API credits
+        </span>
+      </form>
+      {# A separate batch, because it answers a different question: not "who
+         have we never looked at" but "whose panel was built by the old
+         search". Changing what a search asks for does nothing to rows already
+         on disk. #}
+      <form method="post" action="/research/batch/linkedin" class="flex items-end gap-2 flex-wrap w-full mt-2 pt-2 border-t border-[#EFEFF2]">
+        <input type="hidden" name="back" value="/research">
+        <label class="block">
+          <span class="block text-[10px] uppercase tracking-wide text-ink-faint mb-0.5">How many</span>
+          <select name="limit" class="h-8 px-2 rounded-lg bg-white border border-[#E2E3E8] text-[12px] outline-none focus:border-violet2-300">
+            {% for n in batch_sizes %}<option value="{{ n }}" {{ 'selected' if n == 25 }}>{{ n }} contacts</option>{% endfor %}
+          </select>
+        </label>
+        <button class="h-8 px-3 rounded-lg border border-violet2-200 bg-white hover:bg-violet2-50 text-violet2-700 text-[12px] font-medium">Re-pull LinkedIn activity</button>
+        <span class="text-[11px] text-ink-faint pb-1.5">
+          stalest panels first · use this after the search changed, to replace rows the old queries found
+        </span>
+      </form>
+      {% endif %}
+    </div>
+  </section>
+
   <div class="card shadow-card p-4 bg-amber-50/40 border-amber-100">
     <p class="text-[13px] leading-relaxed"><b>Expect thin results for mid-level roles.</b>
     In this list {{ stats.total }} contacts skew Manager and Director. Senior, conference-speaking
@@ -26,11 +76,12 @@
           <th class="font-medium px-4 py-2.5 text-center">LinkedIn</th>
           <th class="font-medium px-4 py-2.5 text-center">Interests</th>
           <th class="font-medium px-4 py-2.5">Focus</th>
+          <th class="font-medium px-4 py-2.5">Research</th>
         </tr>
       </thead>
       <tbody>
       {% for r in rows %}
-        <tr class="border-t border-[#EFEFF2] hover:bg-[#FAFAFB]">
+        <tr id="p-{{ r.person.slug }}" class="border-t border-[#EFEFF2] hover:bg-[#FAFAFB]">
           <td class="px-4 py-3">
             <a href="/person/{{ r.person.slug }}" class="flex items-center gap-2.5 group">
               {{ ui.avatar(r.person, 'w-8 h-8 text-[11px]') }}
@@ -45,6 +96,18 @@
               <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100">derived</span>
             {% else %}
               <span class="text-[12px] text-ink-faint italic">insufficient evidence</span>
+            {% endif %}
+          </td>
+          {# The status and the button together: a run that failed says so here
+             rather than only on the contact's own page, and the button returns
+             to this row instead of the top of a 600-row table. #}
+          <td class="px-4 py-3">
+            <span class="inline-flex flex-wrap items-center gap-1.5">
+              {{ ui.research_badge(r.person.research_status, r.person.research_label) }}
+              {{ ui.research_button(r.person, back='/research#p-' ~ r.person.slug) }}
+            </span>
+            {% if r.person.research_status == 'failed' and r.person.status_note %}
+            <p class="text-[10.5px] text-amber-700 mt-1 max-w-[280px] leading-snug">{{ r.person.status_note }}</p>
             {% endif %}
           </td>
         </tr>
