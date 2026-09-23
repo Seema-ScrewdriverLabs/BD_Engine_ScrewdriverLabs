@@ -703,7 +703,7 @@ produces the text — by two deliberately different routes.
 |---|---|
 | Comment on their post | a model drafts one comment per post, from that post |
 | Comment again | the same drafts; the second step takes the second post |
-| Send email | **composed** from an approved template — no model involved |
+| Send email | **two options side by side** — one composed from an approved template with no model involved, one written by the model under the brief in `skills/` |
 
 Nothing is sent automatically. There is no send button anywhere in this app.
 
@@ -740,6 +740,23 @@ Unsigned is enforced too: a comment naming the sender, their role, or
 Screwdriver is rejected. LinkedIn already shows who is commenting, so a
 signature reads as an advert. The check only looks at the tail, so a contact's
 own name mid-sentence is left alone.
+
+#### The comment dials
+
+The outreach step's comment panel carries the same two dials. The tones are not
+the email's: at 12–36 words there is no room for a register, so they say what
+the comment should **do**.
+
+| Tone | |
+|---|---|
+| **Agree and add** | back the point, add one thing |
+| **Ask about it** | one genuine question |
+| **From experience** | what we have seen |
+
+| Length | |
+|---|---|
+| **Short** | 12–22 words, one or two lines, 150-character ceiling |
+| **Standard** | 20–36 words, two or three lines, 250-character ceiling |
 
 #### Which post it comments on
 
@@ -794,11 +811,19 @@ length bands sit far under the hard limit rather than near it.
 
 ## ✉️ The outreach email
 
-The email step does not ask a model to write an email. It **composes** one from
-an approved template — `app/email_template.py` — in which the brand blocks are
-string constants rather than prompts.
+The email step offers **two emails side by side**, and which to send is a
+judgement about the lead rather than a setting:
 
-The reason is drift. Asked to write a whole email, a model paraphrases the
+| | Composed | Written |
+|---|---|---|
+| Built by | `app/email_template.py` — no model | the model, under the brief in `skills/` |
+| Varies | only where the record justifies it | every line |
+| Costs | nothing | one request |
+| Good for | volume, and anyone thin on research | a contact with something real to reference |
+
+The composed one is described here; the written one is [below](#-the-written-email).
+
+**Composition exists because of drift.** Asked to write a whole email, a model paraphrases the
 company description slightly differently every time, and fifty leads produce
 fifty subtly different accounts of what Screwdriver is. Composition makes the
 fixed parts byte-identical on every send, and confines variation to the parts the
@@ -899,6 +924,50 @@ the session instead and nothing else changes.
 ---
 
 ---
+
+---
+
+### 🖊️ The written email
+
+Beside the composed template sits **Written for <name>** — the whole email
+drafted by the model against the brief in `skills/`, this contact's research
+and [the profile it keeps](#-the-profile-it-keeps). Two dials decide how it
+comes out, and **Rewrite with these** applies both at once.
+
+**Tone** — moves the register, never the rules. The banned phrases and the
+refusal rule are not relaxed by it.
+
+| | |
+|---|---|
+| **Warm** | peer to peer |
+| **Direct** | straight to the point |
+| **Formal** | for senior contacts |
+
+**Length** — a real band, asked for in the prompt *and* checked in code against
+the band that was asked for, not a fixed one:
+
+| | Words |
+|---|---|
+| **Short** | 120–160 |
+| **Medium** | 160–220 |
+| **Detailed** | 220–280 |
+
+Each band names a target and a floor rather than a range, because a range alone
+does not bind: told "120 to 160 words" the drafts came back at 105–116 across
+three contacts. Each also names the **beats** that add up to its length —
+Detailed is four or five short paragraphs, each carrying a fact — because a
+word count on its own does not tell a model how to fill 250 words, and the
+brief rightly forbids padding, so it wrote a good 200-word email and stopped.
+
+**A short draft is sent back once.** If it lands under the floor, the model is
+told its actual count and the shortfall — not the rule again — and asked to
+find the missing words in the research rather than in padding. It fires only on
+a miss, never on a refusal (a refusal is the right answer), and keeps whichever
+of the two drafts sits closer to the band.
+
+If the research will not support a genuine personalised email, none is written:
+the panel says why, and that is a correct outcome rather than a failure.
+
 
 ## 🔑 Keys and providers
 
