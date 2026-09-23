@@ -49,10 +49,23 @@ LOW_VALUE = {"rocketreach.co", "zoominfo.com", "signalhire.com", "lusha.com",
 
 # Firecrawl's date-range filter, restricting a search to the last year.
 # Unfiltered search ranks by engagement, not date, so "what's recent" needs
-# asking for explicitly. Shared by the LinkedIn activity search and the
-# company-news backfill in research_person, both of which care about lately
-# over merely relevant.
+# asking for explicitly. Used by the company-news backfill in research_person,
+# where a year is the right horizon: a funding round from ten months ago is
+# still the news about that company.
 RECENT_WINDOW = "qdr:y"
+
+# The LinkedIn activity search asks on a much shorter horizon, and asks more
+# than once. A year is not a recency filter for a person's posting — it is
+# most of what a search index holds about them anyway, so the filtered query
+# came back with the same well-ranked older posts as the unfiltered one and
+# recent activity was never retrieved at all.
+#
+# Each window is one more search request per contact, which is the cost that
+# matters here: the failures on this data are Firecrawl 429s, requests per
+# minute. Two windows, narrow then wide, is the trade — the month pass is what
+# actually surfaces this week's post, and the quarter catches a contact who
+# posts rarely without waiting for the unfiltered query to rank it.
+ACTIVITY_WINDOWS = ("qdr:m", "qdr:m3")
 
 
 class FirecrawlNotConfigured(RuntimeError):
@@ -384,6 +397,120 @@ def activity_moment(url):
             return dt
     m = _ACTIVITY_ID_RE.search(u)
     return _snowflake_dt(m.group(1)) if m else None
+
+
+# LinkedIn's own title furniture: "Candy Cheng's Post", "Post", and the
+# " | Name - LinkedIn" tail it appends to every page.
+_TITLE_TAIL_RE = re.compile(r"\s*[|\-–]\s*LinkedIn\s*$", re.I)
+_TITLE_GENERIC_RE = re.compile(
+    r"^(.*?'s\s+)?(post|update|activity|profile|photo|video)$", re.I)
+_SLUG_RE = re.compile(
+    r"/posts/[^/?#]*?_([a-z0-9\-]+?)-(?:activity|ugcPost)-\d+", re.I)
+
+# Words that mark a slug as prose rather than a row of hashtags. A slug of
+# "futureskills skillsdevelopment futureofwork" is the post's tags, which say
+# what it is filed under and not what it says; "how embracing discomfort leads
+# to change" is the post talking. English and German, because the contacts in
+# this data post in both.
+_PROSE_MARKERS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "how", "i", "if", "im", "in", "is", "it", "its", "me", "my", "not", "of",
+    "on", "or", "our", "that", "the", "this", "to", "we", "what", "when",
+    "why", "with", "you", "your", "ive", "weve",
+    "das", "dass", "der", "die", "ein", "eine", "einen", "für", "fur", "ich",
+    "ist", "mit", "nicht", "sich", "und", "von", "wir", "zu",
+}
+
+
+def looks_like_attribution(text, identity):
+    """LinkedIn's profile block rather than anything the contact wrote.
+
+    The block names its author two or three times over — "X's Post. View
+    profile for X · X. <their LinkedIn headline>" — and the headline that
+    follows survives has_substance, because it is real words. They are just
+    not the post's words: acting on them produces a comment about somebody's
+    job title, which is the one thing a comment must never be.
+
+    Measured against the rows already on this database: of 44 snippets, every
+    one naming the contact twice or more was the profile block, and every one
+    naming them once carried something they had actually written. Name
+    repetition is the signature, and it survives translation — the German
+    "Profil von X anzeigen · X." repeats it just as the English does, which a
+    phrase list would have to enumerate language by language.
+    """
+    blob = _norm_text(text)
+    if not blob:
+        return False
+    parts = [t for t in (identity.tokens or []) if len(t) >= 3]
+    if not parts:
+        return False
+    # The surname carries further than the forename: "Metz" appears in each
+    # repeat, "Micaela" sometimes only in the first.
+    if max(blob.count(t) for t in parts) >= 2:
+        return True
+
+    # The block is sometimes emitted once rather than three times:
+    # "Micaela Metz. Senior Learning Content Manager @ Axonify | Advanced
+    # Instructional Design". One name, so the repetition rule misses it — but
+    # a LinkedIn headline is a run of roles separated by | or @, which prose
+    # is not, and it opens by naming the person.
+    head = blob[:140]
+    if any(head.startswith(t) or f" {t}" in head[:60] for t in parts):
+        if head.count("|") >= 1 or "@" in head:
+            return True
+    return False
+
+
+def headline_from_title(title, identity=None):
+    """The post's own words out of the search result's title, or None.
+
+    LinkedIn titles a post page with its opening line when there is one —
+    "KP Monthly Recap: July & August | Candy Cheng - LinkedIn" — and with
+    nothing but furniture when there is not: "Candy Cheng's Post - LinkedIn".
+    """
+    t = (title or "").strip()
+    if not t:
+        return None
+    t = _TITLE_TAIL_RE.sub("", t).strip()
+    # Drop the trailing "| Person Name" segment, keeping the first.
+    head = t.split("|")[0].strip(" -–|").strip()
+    if not head or _TITLE_GENERIC_RE.match(head):
+        return None
+    if identity is not None and not has_substance(head, identity):
+        return None
+    # A title that is only hashtags says what the post is filed under, not
+    # what it says — the same reason headline_from_url refuses one. LinkedIn
+    # uses the tags as the title when a post opens with them.
+    words = head.replace("#", " ").split()
+    if head.count("#") >= 2 or (head.startswith("#") and len(words) <= 6):
+        return None
+    return head if len(head.split()) >= 3 else None
+
+
+def headline_from_url(url):
+    """The post's opening words, decoded from the slug LinkedIn built, or None.
+
+    Returns prose only. A slug that is a row of hashtags says what the post is
+    filed under, not what it says, and a comment cannot be grounded in it.
+    """
+    m = _SLUG_RE.search(unquote(url or ""))
+    if not m:
+        return None
+    words = [w for w in m.group(1).split("-") if w]
+    if len(words) < 4:
+        return None
+    if not any(w in _PROSE_MARKERS for w in words):
+        return None            # hashtags, not a sentence
+    return " ".join(words)
+
+
+def post_headline(url, title, identity=None):
+    """The best available opening line for this post, or None.
+
+    The title first: it keeps its capitals and punctuation. The slug second:
+    lowercased and stripped of punctuation, but present far more often.
+    """
+    return headline_from_title(title, identity) or headline_from_url(url)
 
 
 def is_comment_url(url):
@@ -733,11 +860,15 @@ def find_linkedin_activity(person, limit=5):
     # keeps its terms in specificity order, so the last one is the shortest.
     company = identity.employer_query
     base = f'site:linkedin.com/posts "{name}"'
+    # Recent windows first. Order does not decide the panel — the sort at the
+    # bottom of this function does — but it decides what is in the pool at all
+    # when a query fails or the per-query limit bites.
     queries = [(q, tbs) for q, tbs in (
-        (base, None),
-        (f'{base} {company}'.strip(), None),
-        (f'site:linkedin.com/pulse "{name}"', None),
-        (base, RECENT_WINDOW),
+        [(base, w) for w in ACTIVITY_WINDOWS] + [
+            (base, None),
+            (f'{base} {company}'.strip(), None),
+            (f'site:linkedin.com/pulse "{name}"', None),
+        ]
     ) if q]
 
     seen, rows, observed = set(), [], None
@@ -796,8 +927,22 @@ def find_linkedin_activity(person, limit=5):
             # chip be derived from a job title — the one thing the chips are
             # not allowed to do. The row keeps its link, type and date.
             substance = has_substance(text, identity)
+            source = "snippet" if substance else None
+            if substance and looks_like_attribution(text, identity):
+                # It reads as substance because a LinkedIn headline is real
+                # words. It is still the profile block, not the post.
+                substance, source = False, None
+            if not substance:
+                # No body in the snippet, which is the normal case: the search
+                # index holds LinkedIn's attribution block, not the post. The
+                # opening line is the only thing of the author's that is
+                # actually available — see post_headline.
+                opening = post_headline(url, h.get("title"), identity)
+                if opening:
+                    text, substance, source = opening[:900], True, "headline"
             rows.append({
                 "activity_type": kind,
+                "text_source": source,
                 "url": url,
                 "text": text if substance else None,
                 "activity_date": moment.date() if moment else None,
@@ -825,12 +970,27 @@ def find_linkedin_activity(person, limit=5):
     def order(r):
         m = r["_moment"]
         authored = r["activity_type"] in ("post", "repost")
+        # Recency leads, and nothing sits in front of it.
+        #
+        # Two rules used to. "Their own posts first" was right while rows that
+        # merely named the contact could still reach this sort — those arrive
+        # in volume and would have answered "who has been named lately". They
+        # cannot reach it any more: _attribute discards anything not provably
+        # this contact's, which on one measured contact was 21 rows out of 29.
+        # Every row here is already theirs.
+        #
+        # "Readable first" was the other, and it is what actually produced the
+        # complaint: whether a snippet carries text is a fact about the search
+        # index, not about the contact, so a post from this month with an
+        # unreadable snippet sank below a post from 2020 that happened to have
+        # one. Drafting is unaffected — personalisation._activity_signals only
+        # offers rows that have text, so the comment path still picks the
+        # newest *usable* row rather than whatever landed at rank 1.
         return (
-            not (authored and r["_substance"]),     # their own words, readable
-            not authored,                           # then anything they wrote
-            not r["_substance"],                    # then anything readable
             m is None,                              # dated rows before undated
             -m.timestamp() if m else 0,             # newest first
+            not authored,                           # a post beats a comment
+            not r["_substance"],                    # then readable
             r["activity_type"] == "repost",         # own words before echoes
         )
 

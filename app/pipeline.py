@@ -9,8 +9,10 @@ Nothing here prints. The caller decides how to report — the CLI writes lines,
 the web request updates a status the page can show.
 """
 import threading
+import time
 from datetime import datetime, timezone
 
+from . import apify
 from . import interests as interests_mod
 from . import research
 from . import resolve
@@ -22,6 +24,119 @@ from .models import (
 )
 
 MAX_ACTIVITIES = 5
+
+# Seconds to wait between contacts in a queued run. The failures already on
+# this database are Firecrawl 429s — requests per minute, with credits still
+# on the plan — so the gap is the difference between a batch that finishes and
+# one that fails halfway. Overridable for a plan with a higher ceiling.
+QUEUE_GAP_SECONDS = 6
+
+# One queue at a time, process-wide. Two batches interleaved would double the
+# request rate and put us straight back into the 429s this gap exists to
+# avoid, and the reader has no way to tell two batches apart anyway.
+_queue_lock = threading.Lock()
+_queue_state = {"running": False, "done": 0, "total": 0, "current": None,
+                "failed": 0, "stopped": False, "kind": "research"}
+
+
+def _fail(db, person, kind, exc):
+    """Record a failure against whichever job was running.
+
+    A LinkedIn refresh must not mark the contact's RESEARCH failed: the
+    research is fine, and doing so would offer a full re-run to fix a panel.
+    """
+    if kind == "linkedin":
+        person.linkedin_refreshing = False
+        person.linkedin_refresh_error = str(exc)[:200]
+    else:
+        person.recompute_status(research_failed=True, note=str(exc)[:200])
+    db.commit()
+
+
+def queue_status():
+    """A snapshot of the batch, for the page to report. Never blocks."""
+    return dict(_queue_state)
+
+
+def stop_queue():
+    """Ask the batch to stop after the contact it is on."""
+    _queue_state["stopped"] = True
+
+
+def queue_research(slugs, gap=None, kind="research"):
+    """Work through each slug in turn, in one background thread. Returns at once.
+
+    `kind` is "research" for the full pipeline or "linkedin" for the activity
+    search alone. The second exists because a change to what the search asks
+    for does nothing to rows already stored, and re-running everything to
+    refresh one panel spends far more than it needs to.
+
+    Serial on purpose — see QUEUE_GAP_SECONDS. Each contact is marked running
+    before its turn and resolved after it, so the existing badge and the
+    auto-refresh report progress with nothing new to render.
+
+    Returns the number queued, or 0 if a batch is already in flight.
+    """
+    slugs = [s for s in dict.fromkeys(slugs) if s]        # de-dupe, keep order
+    if not slugs:
+        return 0
+    if not _queue_lock.acquire(blocking=False):
+        return 0
+
+    _queue_state.update(running=True, done=0, total=len(slugs), current=None,
+                        failed=0, stopped=False, kind=kind)
+
+    wait = QUEUE_GAP_SECONDS if gap is None else gap
+
+    def run():
+        try:
+            for i, slug in enumerate(slugs):
+                if _queue_state["stopped"]:
+                    break
+                db = SessionLocal()
+                try:
+                    person = db.query(Person).filter(
+                        Person.slug == slug).first()
+                    if person is None:
+                        continue
+                    _queue_state["current"] = slug
+                    if kind == "linkedin":
+                        # No mark_running: this does not touch research_status,
+                        # and parking the contact at "Researching" would offer
+                        # to start a full run the moment the badge cleared.
+                        person.linkedin_refreshing = True
+                        db.commit()
+                    else:
+                        mark_running(db, person)
+                    try:
+                        if kind == "linkedin":
+                            refresh_linkedin(db, person)
+                            person.linkedin_refreshing = False
+                            person.linkedin_refresh_error = None
+                            db.commit()
+                        else:
+                            research_contact(db, person)
+                    except Blocked as e:
+                        # The whole run cannot proceed - no key, bad key, no
+                        # credits. Carrying on would mark every remaining
+                        # contact failed for a reason that is not about them.
+                        _fail(db, person, kind, e)
+                        _queue_state["failed"] += 1
+                        break
+                    except Exception as e:
+                        _fail(db, person, kind, e)
+                        _queue_state["failed"] += 1
+                finally:
+                    db.close()
+                _queue_state["done"] = i + 1
+                if i + 1 < len(slugs) and not _queue_state["stopped"]:
+                    time.sleep(wait)
+        finally:
+            _queue_state.update(running=False, current=None)
+            _queue_lock.release()
+
+    threading.Thread(target=run, name="research-queue", daemon=True).start()
+    return len(slugs)
 
 
 class Blocked(RuntimeError):
@@ -54,7 +169,40 @@ def refresh_linkedin(db, person):
     room = MAX_ACTIVITIES - len(pasted)
     if room <= 0:
         return 0
-    found, observed = research.find_linkedin_activity(person, limit=room)
+
+    # Apify reads the contact's own profile, so it is the source whenever a
+    # token is configured: the post body and its exact date come back as
+    # data, and authorship is not in question. Firecrawl is not asked about
+    # LinkedIn at all in that case — it cannot fetch the site, and a name
+    # search returns other people's posts. It keeps the company and web work.
+    #
+    # Without a token the Firecrawl path still runs, so an install that has
+    # not set one up is no worse off than before.
+    observed = None
+    if apify.configured():
+        url = apify.profile_url(person)
+        try:
+            found, note = apify.fetch_posts(url, limit=room)
+        except apify.ApifyRejected as exc:
+            person.linkedin_posts_checked_at = datetime.now(timezone.utc)
+            person.linkedin_posts_source = "apify"
+            person.linkedin_posts_note = str(exc)[:300]
+            db.commit()
+            raise Blocked(str(exc)) from exc
+        person.linkedin_posts_source = "apify"
+        person.linkedin_posts_note = note or None
+    else:
+        found, observed = research.find_linkedin_activity(person, limit=room)
+        person.linkedin_posts_source = "firecrawl"
+        person.linkedin_posts_note = (
+            None if found else
+            "No posts found through web search. Firecrawl cannot read "
+            "LinkedIn directly — set an Apify token on the Settings page to "
+            "read the profile itself."
+        )
+    person.linkedin_posts_checked_at = datetime.now(timezone.utc)
+    db.commit()
+
     if observed:
         person.linkedin_observed = observed["url"]
         person.linkedin_observed_source = observed["evidence"][:600]

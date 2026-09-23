@@ -37,8 +37,28 @@ ADDED_COLUMNS = {
         ("suggested_note", "VARCHAR"),
         ("suggested_at", "DATETIME"),
         ("suggested_model", "VARCHAR"),
+        # Where `text` came from: "snippet" (the search result's description),
+        # "headline" (the post's opening, recovered from its URL or title), or
+        # null for a pasted row, which is the real thing. The comment prompt is
+        # told which, because a headline is a topic and a snippet is a body.
+        ("text_source", "VARCHAR"),
     ],
     "people": [
+        # Which upload this contact arrived on. Null for anyone imported
+        # before uploads were recorded, which the Reports page reports as its
+        # own group rather than pretending they came from nowhere.
+        ("import_id", "INTEGER"),
+        # Which provider last filled the LinkedIn POSTS panel, when we last
+        # looked, and what there was to say about it. All three are needed to
+        # tell "no posts on this profile" apart from "never checked": the
+        # panel renders identically otherwise, and the first is an answer
+        # while the second is a to-do.
+        #
+        # Named apart from linkedin_source above, which is a different thing
+        # entirely — that one records where the profile URL itself came from.
+        ("linkedin_posts_source", "VARCHAR"),
+        ("linkedin_posts_checked_at", "DATETIME"),
+        ("linkedin_posts_note", "VARCHAR"),
         ("enrichment_status", "VARCHAR"),
         ("research_status", "VARCHAR"),
         ("email_source", "VARCHAR"),

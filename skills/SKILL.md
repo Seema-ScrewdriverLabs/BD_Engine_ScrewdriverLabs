@@ -36,7 +36,7 @@ If none of the first four give you a real, specific signal, say so — see "When
 
 **Write the email:**
 - Subject line: short, specific, not clickbait-y or salesy. Reference the real signal, not "Quick question" or "Loved your post."
-- 80–120 words. Count it — don't guess.
+- Use the word count you are given in the LENGTH section. Count it — don't guess. If no length is given, aim for 160–220 words.
 - Opens with the research signal stated plainly (not "I noticed that you..." — just say the thing).
 - One relevant Screwdriver capability or project, stated as a natural bridge, not a pitch dump.
 - One low-pressure CTA — an offer to share something, a question, "worth a quick chat?" Never "Let's schedule a call to discuss synergies."
@@ -77,7 +77,7 @@ Return exactly this structure for every lead processed:
 **Subject:** [line]
 
 **Body:**
-[80–120 word email]
+[the email, at the word count you were given]
 
 **Personalization signal:** [the exact fact/post/news this was built on, with source]
 **Screwdriver opportunity/case study used:** [which capability or portfolio piece, and why it fits]

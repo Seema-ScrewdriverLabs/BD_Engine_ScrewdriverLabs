@@ -98,7 +98,8 @@
         </div>
         <a href="/people" class="text-[12px] font-medium text-violet2-600 hover:underline">View all {{ total_people }}</a>
       </div>
-      {{ ui.people_table(people, selected_slug=person.slug if person else None) }}
+      {{ ui.people_table(people, selected_slug=person.slug if person else None,
+                   back='/?selected=' ~ person.slug if person else '/') }}
     </section>
 
   </div>

@@ -28,7 +28,8 @@
     <div class="px-5 pt-5 pb-3.5">
       <h3 class="text-[15px] font-bold">Contacts at {{ company.name }}</h3>
     </div>
-    {{ ui.people_table(company.people, link_full=True) }}
+    {{ ui.people_table(company.people, link_full=True,
+                   back='/company/' ~ company.id) }}
   </section>
 </div>
 {% endblock %}

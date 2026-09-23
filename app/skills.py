@@ -171,8 +171,13 @@ _MEMORY_NOTE = (
 )
 
 
-def email_system(directory=None, memory=""):
-    """The system prompt for drafting one cold email."""
+def email_system(directory=None, memory="", tone="", length=""):
+    """The system prompt for drafting one cold email.
+
+    `tone` is an instruction, appended after the brief so it reads as the last
+    word on register without contradicting anything above it. The brief decides
+    what the email says; tone decides how it sounds.
+    """
     d = load(directory)
     parts = ["You are drafting outbound copy for Screwdriver Films. The rules "
              "below are the brief; follow them literally.",
@@ -183,11 +188,27 @@ def email_system(directory=None, memory=""):
         parts += ["", "=== WHAT SCREWDRIVER DOES ===", d["knowledge"]]
     if memory and memory.strip():
         parts += ["", _MEMORY_HEADER, _MEMORY_NOTE, "", memory.strip()]
+    if tone and tone.strip():
+        parts += ["", "=== TONE ===",
+                  "Write it in this register. Everything above still applies —"
+                  " the banned phrases and the refusal rule are not relaxed by"
+                  " it.", "", tone.strip()]
     parts += ["",
               "You are doing Task 1 (the email) only. Ignore the LinkedIn "
               "comment task and the Markdown report format in the brief — the "
               "output schema below replaces it.",
               _JSON_TAIL_EMAIL]
+    # Length goes last, after the output schema, rather than in the middle of a
+    # 14,000 character prompt. The band is the one instruction with an exact
+    # number in it, and drafts were landing just under the floor often enough
+    # to matter; this is the final thing read before writing.
+    if length and length.strip():
+        parts += ["", "=== LENGTH: CHECK THIS BEFORE YOU ANSWER ===",
+                  "This replaces the word count in the brief.", "",
+                  length.strip(), "",
+                  "Count the words in the body before returning it. If it is "
+                  "under the minimum, add another concrete fact from the "
+                  "research rather than returning it short."]
     return "\n".join(parts)
 
 
@@ -214,7 +235,10 @@ def comment_system(directory=None, memory=""):
 # The brief states these; they are restated here because a rule only asked for
 # in a prompt is a rule that holds most of the time. Same principle the rest of
 # this app already applies to drafted copy.
-EMAIL_WORDS = (80, 120)         # voice-and-format.md, "Email structure"
+# The band used when no length was chosen. Kept in step with
+# messages.DEFAULT_SKILL_LENGTH — the brief itself no longer fixes a number,
+# because the length dial does.
+EMAIL_WORDS = (160, 220)
 COMMENT_SENTENCES = 2           # voice-and-format.md, "Comment structure"
 SUBJECT_WORDS_MAX = 8           # voice-and-format.md, "Subject line rules"
 
