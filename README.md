@@ -59,6 +59,7 @@ make something up.
 | [🔎 Research](#-research) | LinkedIn, the web, companies, CSV import |
 | [📋 Outreach](#-outreach) | the sequence, rejecting, drafted comments |
 | [✉️ The outreach email](#-the-outreach-email) | composed from a template |
+| [🗃️ The CSVs you uploaded](#-the-csvs-you-uploaded) | what each file brought, and removing one |
 | [📝 The copy brief](#-the-copy-brief) | the Markdown that decides what it writes |
 | [🧠 The profile it keeps](#-the-profile-it-keeps) | how it learns your voice |
 | [🎯 Segmenting the list](#-segmenting-the-list) | country and category filters |
@@ -120,7 +121,8 @@ a host is never overwritten by a stale `.env`.
 
 | Variable | Needed for | Without it |
 |---|---|---|
-| `FIRECRAWL_API_KEY` | all web research | `run_pipeline.py` exits immediately; every research panel stays empty |
+| `FIRECRAWL_API_KEY` | company and web research | `run_pipeline.py` exits immediately; the company and web panels stay empty |
+| `APIFY_API_KEY` | LinkedIn posts | falls back to web search, which finds far less and rarely the latest |
 | `LLM_BASE_URL` | interest chips, drafted messages | defaults to Groq's endpoint |
 | `LLM_MODEL` | the same | defaults to `openai/gpt-oss-120b` |
 | `LLM_API_KEY` | the same | drafting and interest detection are skipped, with a reason on the page |
@@ -163,9 +165,9 @@ rest.
 | **People** | the whole list, searchable and segmented by country and category |
 | **Companies** | one row per employer, with what research found out about them |
 | **Enrichment** | who is missing identity fields, and which ones |
-| **Research** | who has been looked up, and what was found for them |
+| **Research** | who has been looked up, what was found — and the batch buttons that do the looking |
 | **Outreach** | the day's tasks, and where every contact has got to |
-| **Reports** | breakdowns, and the stale-designation list |
+| **Reports** | breakdowns, the stale-designation list, and every CSV you have uploaded |
 
 A contact's own page gathers all of it: identity, a composed summary, their
 employer, what the web says about that employer, their LinkedIn activity, their
@@ -346,17 +348,54 @@ source.
 
 ### 💼 LinkedIn
 
-This app has no LinkedIn credentials, no scraper, and no third-party LinkedIn
-data provider. It never logs into LinkedIn and never fetches a linkedin.com
-page. Activities reach the panel two ways, and each row says which:
+This app holds no LinkedIn credentials and never logs in. Activities reach the
+panel three ways, and **every row says which**.
 
-**found by search** — `run_pipeline.py`, and the Research button, ask the same
-web search index used for everything else for public post URLs
-(`site:linkedin.com/posts "Name"`). A post URL is
-`/posts/<author-slug>_<words-from-the-post>-activity-<id>`, so the author
-segment is the only thing in a search result that can prove authorship. Each
-row keeps the query and the fetch time, the same provenance a web finding
-carries.
+**Three providers, three jobs.** They do not overlap, and `t_providers.py`
+asserts each is called for its own work and not for the others:
+
+| Job | Provider |
+|---|---|
+| Company description, company news, the web panel | **Firecrawl** search |
+| LinkedIn posts | **Apify**, through the profile URL |
+| Writing comments and emails, interest chips, the focus line | **Claude** or **Groq** |
+
+#### 1. Apify — the profile itself
+
+**Firecrawl cannot read LinkedIn.** A scrape of any `linkedin.com` URL returns
+`403 "we do not support this site"`, and `scrapeOptions` on a search comes back
+with no content. That is a policy, not a configuration, so no amount of query
+tuning gets a post body out of it.
+
+`app/apify.py` runs the `harvestapi/linkedin-profile-posts` actor against the
+LinkedIn URL **the CSV supplied** — no LinkedIn account, no cookies. The post
+body and the exact posted date arrive as data rather than being reconstructed,
+and **authorship stops being a question**: the actor was pointed at that
+contact's profile, so every row is theirs by construction.
+
+The difference is not marginal. On one contact the search route's newest post
+was 28 days old with the text `"Candy Cheng's Post. View profile for Candy
+Cheng"`; Apify returned a post from **the previous day**, with its words. On
+another, the search route discarded **21 of 29 candidate rows** as possible
+namesakes — Lindsey Vonn among them.
+
+Set `APIFY_API_KEY` on the Settings page or in `.env`. Each contact records
+which provider filled its panel and when, so an empty panel can say *"Apify
+read the profile on 22 Sep and it has no posts"* rather than looking broken —
+an answer, not a failed run.
+
+#### 2. Firecrawl search — the fallback, when no Apify token is set
+
+The original route, kept so an install without a token still works. It asks the
+web search index for public post URLs (`site:linkedin.com/posts "Name"`), plus
+two recency passes (`qdr:m`, `qdr:m3`) because an unfiltered search ranks by
+engagement and returns 2024's popular post rather than last week's.
+
+A post URL is `/posts/<author-slug>_<words-from-the-post>-activity-<id>`, so the
+author segment is the only thing in a search result that can prove authorship.
+Each row keeps the query and the fetch time, the same provenance a web finding
+carries. Everything below about attribution applies to **this route only** —
+Apify needs none of it.
 
 A row is kept only when something ties it to *this* contact. Three things can:
 
@@ -390,14 +429,32 @@ found is stored in `linkedin_observed` and the contact's page says the file's
 URL points elsewhere — the header link and the outreach board's "Open their
 LinkedIn" both go to the wrong profile until someone fixes it.
 
-**Ordering.** Kind first, then recency inside a kind: the contact's own
-readable posts, then anything else they wrote, then anything readable, then the
-rest — newest first throughout, decoded from each URL's activity id. Recency
-alone was right while every row was a post they wrote. Once posts that merely
-name them are admitted it is not: those arrive in volume and are mostly
-LinkedIn's attribution block with a fresh date on it, so recency alone ranked a
-content-free February mention above Gordon Hirons' own announcement of the IB
-Science Questionbanks.
+**Ordering: recency leads.** Newest first, then a post before a comment, then
+whatever is readable. Two rules used to sit in front of recency and both are
+gone. *Their own posts first* was right while unverified rows could still reach
+the sort — they cannot now, so every row is already theirs. *Readable first*
+was the other, and it is what produced the complaint that the panel showed
+posts from months ago: whether a snippet carries text is a fact about the
+search index, not about the contact, so a post from this month with an
+unreadable snippet sank below one from 2020 that happened to have one.
+
+**When the snippet is furniture.** The index usually returns LinkedIn's
+attribution block rather than the post — `"Micaela Metz's Post. View profile
+for Micaela Metz · Micaela Metz. Senior Learning Content Manager @ Axonify"`.
+That passes a naive substance check, because a job title *is* real words, so
+the app was trying to write comments about people's job titles. The signature
+is the contact's own name repeated: on this database **every row naming them
+twice or more was furniture, and every row naming them once carried something
+they wrote**. Unlike a phrase list, that works in German too.
+
+**Recovering the opening line.** When the snippet is furniture, LinkedIn's own
+URL slug and page title still carry the post's first words —
+`/posts/candy-cheng-_kp-monthly-recap-july-august-activity-…`. 55 of 67 stored
+posts decode. A hashtag-only slug is refused: it says what a post is filed
+under, not what it says. Rows recovered this way are marked as a **headline**,
+and both comment prompts are told — *"respond to the topic, or ask about it. Do
+NOT refer to details, numbers or conclusions as though you had read them."* A
+comment inventing the rest of a post is the failure this app exists to avoid.
 
 **Snippets that say nothing.** When a contact comments under someone else's
 post, what the index returns is often just LinkedIn's furniture — "Micaela Metz,
@@ -478,6 +535,51 @@ silently:
 
 Rows are read positionally, so a duplicated column name can never silently
 swallow another column's data.
+
+---
+
+### 📦 Researching in batches
+
+One button per contact does not scale to 685 of them. The **Research** page has
+two batch runners:
+
+- **Research the next batch** — 10, 25, 50 or 100 contacts, least-covered
+  first.
+- **Re-pull LinkedIn activity** — just the posts, stalest panels first. Changing
+  what a search asks for does nothing to rows already stored, so this is how a
+  change reaches contacts researched before it.
+
+Both run **strictly one contact at a time, 6 seconds apart**. That is not
+timidity: the failures recorded on this database are Firecrawl **429s** —
+requests per minute, with credits still on the plan — so firing them in
+parallel is the one approach guaranteed not to finish. Progress shows live
+(`Researching 7 of 25 — sarah-grossman`), a **Stop after this one** button ends
+it, and a second batch is refused while one runs.
+
+A `Blocked` error — bad key, no credit — stops the batch rather than marking
+every remaining contact failed for a reason that is not about them.
+
+---
+
+### 🖱️ The page does not move under you
+
+Every action here is a form that posts, redirects and reloads, so the browser
+would land at the top and whatever you pressed would be off screen. The scroll
+position is recorded on any form submit and restored on the next load of the
+same page — every button, including ones added later, and including the two
+auto-reloaders that poll while research runs.
+
+Deliberately narrow: only form submits (a nav link still lands at the top of
+the new page), same page only, single-use, and expiring after 30 seconds, so a
+position can never resurface on an unrelated visit. It is tested by
+`scroll.js`, which runs the real script out of `base.html` against a
+hand-rolled DOM — this project ships no Node at runtime, so jsdom would be the
+wrong dependency to add for twenty lines of script.
+
+**And nothing is cached.** Every page returns `Cache-Control: no-store`. Without
+it the browser could answer the GET after a `303` from its own cache, so
+pressing **Research** left the row reading *"Not researched"* however long you
+waited. That single missing header is what made research look broken.
 
 ---
 
@@ -612,12 +714,41 @@ identically on every lead, so writing it fresh each time is the wrong tool — s
 
 ### 💬 Drafted comments
 
-**Draft comments** on a contact's LinkedIn panel drafts one comment for each post
-on file. Re-running skips posts that already have one, so a stray double-click
-costs nothing; **Redraft** forces them all.
+**Every post has its own buttons** — **Draft a comment**, then **Redraft this
+one** and **Discard it** once there is one. One model call, for that post only.
+Drafting used to be all-or-nothing: a comment on yesterday's post spent a call
+on the four older ones too, and redoing one redid all five. **Draft comments**
+at the top still fills an empty panel in one go.
 
-The drafts are written as a marketing lead would write them: a peer who read the
-post properly and has a view on it, not a fan and not a commenter-for-reach.
+A post with no text gets no button at all, just a line saying why — a button
+there would spend a call to be told the same thing.
+
+The drafts are written as a peer who read the post properly and has a view on
+it, not a fan and not a commenter-for-reach.
+
+#### A comment is not a short email
+
+Two or three lines, **under 250 characters**, and **unsigned**.
+
+250 is where LinkedIn collapses a comment behind *"…see more"*, so a longer one
+is not long-but-fine — it is a comment whose second half nobody reads. Both
+length bands sit under it (**Short**, one or two lines; **Standard**, two or
+three), and it is enforced in code on **both** drafting paths, not merely asked
+for in the prompt.
+
+Unsigned is enforced too: a comment naming the sender, their role, or
+Screwdriver is rejected. LinkedIn already shows who is commenting, so a
+signature reads as an advert. The check only looks at the tail, so a contact's
+own name mid-sentence is left alone.
+
+#### Which post it comments on
+
+The outreach sequence's comment steps pick the **most recent** post with enough
+in it to reference — a 20-word floor, below which a post is a one-line
+congratulation with nothing specific to ground a comment in. It used to sort by
+length alone, so a 13-day-old post of 52 words beat a 2-day-old one of 48. Four
+words is not worth eleven days: a comment is read in the window the post is
+live.
 
 #### It refuses rather than padding
 
@@ -771,6 +902,24 @@ the session instead and nothing else changes.
 
 ## 🔑 Keys and providers
 
+Three keys, three jobs. All are entered on the **Settings** page, which writes
+them to `.env` *and* into the running process, so a key works on the next click
+rather than after a restart.
+
+| Key | Does | Without it |
+|---|---|---|
+| `FIRECRAWL_API_KEY` | company description, company news, the web panel | those panels stay empty |
+| `APIFY_API_KEY` | LinkedIn posts, via the profile URL from the CSV | falls back to web search |
+| `ANTHROPIC_API_KEY` *or* `GROQ_API_KEY` | writes comments and emails, interest chips, the focus line | drafting is skipped, with the reason on the page |
+
+`t_providers.py` holds the split in place: it asserts each provider is called
+for its own job **and not for the others** — Apify is never asked about a
+company, Firecrawl is never asked about LinkedIn while a token exists, neither
+is asked to write. It also reads the modules themselves, so `app/apify.py`
+calling `api.firecrawl.dev` would fail the suite.
+
+### The model: Claude or Groq
+
 Two providers, chosen on the **Settings** page. Keys for both can sit on file
 at once; the radio decides which one is called.
 
@@ -798,6 +947,42 @@ while the OpenAI shape wants the opposite. Call sites never see the difference.
 > a local Ollama and no other change is needed.
 
 ---
+
+---
+
+## 🗃️ The CSVs you uploaded
+
+**Reports** lists every file that built the database, newest first, with the
+name you uploaded it under, when, how big it was, and how many of its columns
+the importer recognised.
+
+Two sets of numbers per file, deliberately:
+
+- **What the run did** — rows read, contacts added, contacts that matched
+  someone already here, rows it could not use.
+- **What those contacts are now** — companies, how many have an email, a
+  LinkedIn URL, have been researched, are in a sequence, plus the industries
+  and countries they cluster in.
+
+They diverge the moment anyone deletes a contact, and the count at the top right
+is always the live one.
+
+**Removing a file** offers two things, behind a disclosure, each naming its own
+number:
+
+| | Does |
+|---|---|
+| **Delete the file and N contacts** | removes the upload *and* the contacts it created, with their research, posts, drafts and sequence steps. Cannot be undone. |
+| **Forget the file, keep the contacts** | takes it off the list, touches no contact. |
+
+Delete removes only the contacts that file **created**. One it merely matched
+and filled in did not arrive on it, and deleting those would take out contacts
+another file is responsible for — so they stay, and the panel says so.
+
+Contacts imported before uploads were recorded have no file to list, and the
+page says how many rather than leaving them out, which would make the numbers
+not add up.
+
 
 ## 📝 The copy brief
 
